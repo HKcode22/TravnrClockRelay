@@ -69,7 +69,7 @@ test("failed protected root requires custody reconciliation, never replays",asyn
 
 function multi(mode,fault=""){
  const x=f(mode,fault);
- Object.assign(x.env,{TRAVNR_RELAY_MODE:"MULTI_LANE",TRAVNR_RELAY_LANE:mode,TRAVNR_RELAY_PRIMARY_ENABLED:"1",TRAVNR_RELAY_ROLLING_ENABLED:"1",TRAVNR_RELAY_PRIMARY_SINCE_UTC:new Date(NOW-3600000).toISOString(),TRAVNR_RELAY_ROLLING_SINCE_UTC:new Date(NOW-3600000).toISOString()});
+ Object.assign(x.env,{TRAVNR_RELAY_MODE:"MULTI_LANE",TRAVNR_TARGET_FORWARD_ENV_READY:"1",TRAVNR_RELAY_LANE:mode,TRAVNR_RELAY_PRIMARY_ENABLED:"1",TRAVNR_RELAY_ROLLING_ENABLED:"1",TRAVNR_RELAY_PRIMARY_SINCE_UTC:new Date(NOW-3600000).toISOString(),TRAVNR_RELAY_ROLLING_SINCE_UTC:new Date(NOW-3600000).toISOString()});
  return x;
 }
 test("multi-lane rolling independent of known terminal primary failure",async()=>{const x=multi("ROLLING_ROOT","otherLane");assert.equal((await runPulse(x.env,x.opts)).targetRunId,201);assert.equal(x.posts(),1);});
@@ -109,3 +109,5 @@ test("missing target job or started target step never proves safe recovery",()=>
  assert.equal(provesNoTargetStep(r,[...js.slice(0,2),{...js[2],steps:[]}]),false);
  assert.equal(provesNoTargetStep(r,[...js.slice(0,2),{...js[2],steps:[{name:"Run node cli.mjs",status:"completed",conclusion:"failure"}]}]),false);
 });
+
+test("multi-lane recovery cannot forward from an uncommissioned target environment",async()=>{const x=multi("ROLLING_ROOT");delete x.env.TRAVNR_TARGET_FORWARD_ENV_READY;const r=await runPulse(x.env,x.opts);assert.equal(r.status,"EXTERNAL_WAKE_PREFLIGHT_DEFERRED_NO_POST");assert.equal(r.reason,"HOLD_EXTERNAL_CLOCK_TARGET_FORWARD_ENV_NOT_COMMISSIONED");assert.equal(x.posts(),0)});
