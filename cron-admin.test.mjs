@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {managedSpec,exactManaged,manage,rekeyPilot,LANES} from "./cron-admin.mjs";
+import {managedSpec,exactManaged,manage,createDisabledPair,rekeyPilot,LANES} from "./cron-admin.mjs";
 import {PILOT} from "./cron-audit.mjs";
 const pin="a".repeat(40),now=Date.parse("2026-11-18T08:00:00Z"),until="2026-11-20T08:00:00.000Z",tok="github_pat_"+"t".repeat(40),newTok="github_pat_"+"n".repeat(40);
 const ops={CREATE_DISABLED:"CREATE_EXACT_DISABLED_MANAGED_CRON_JOB",ENABLE_EXACT:"ENABLE_EXACT_MANAGED_CRON_JOB",DISABLE_EXACT:"DISABLE_EXACT_MANAGED_CRON_JOB"};
@@ -46,3 +46,51 @@ test("already rekeyed no mutation and disabled pilot never auto-enabled",async()
 test("unknown rekey PATCH not repeated",async()=>{const f=pilotFixture("unknown");await assert.rejects(rekeyPilot({token:newTok,now:f.pilotNow},f));assert.deepEqual(f.calls,["GET","PATCH"])});
 
 test("prior rotation attempt permits only exact readback, not another PATCH",async()=>{const f=pilotFixture();await assert.rejects(rekeyPilot({token:newTok,now:f.pilotNow,allowWrite:false},f),/PREVIOUS_ATTEMPT/);assert.deepEqual(f.calls,["GET"]);const g=pilotFixture(),x=await rekeyPilot({token:tok,now:g.pilotNow,allowWrite:false},g);assert.equal(x.cronMutations,0);});
+
+function pairFixture(fault=""){
+ const store=new Map(),calls=[],events=[];
+ const pair={until,token:tok,now,jobId:null,confirm:"CREATE_BOTH_RECOVERY_CRON_JOBS_DISABLED_NO_FORWARD",pin,env:{TRAVNR_RELAY_MODE:"CLOCK_ONLY"}};
+ if(fault==="existingRolling")store.set(90,{jobId:90,...managedSpec({lane:"ROLLING_ROOT",until,token:tok,now})});
+ let count=0;
+ const request=async(method,path,body)=>{
+  calls.push({method,path});
+  if(method==="GET"&&path==="/jobs")return {someFailed:false,jobs:[...store.values()].map(x=>({jobId:x.jobId,title:x.title,url:x.url,schedule:x.schedule}))};
+  if(method==="GET")return {jobDetails:store.get(Number(path.split("/").at(-1)))};
+  if(method==="PUT"){
+   count++;
+   assert.equal(body.job.enabled,false);
+   if(fault==="firstUnknown"&&count===1||fault==="secondUnknown"&&count===2)throw Error("timeout");
+   const n=fault==="duplicateAck"?42:41+count;
+   store.set(n,{jobId:n,...body.job});
+   return {jobId:n};
+  }
+  throw Error("unexpected operation");
+ };
+ return {pair,store,calls,events,request,main:async()=>pin,emit:x=>events.push(x),sleep:async()=>{}};
+}
+test("pair provisions two disabled jobs with one exact approval, final readbacks and no forwarding",async()=>{
+ const f=pairFixture(),a=await createDisabledPair(f.pair,f);
+ assert.equal(a.status,"MANAGED_RECOVERY_PAIR_DISABLED_VERIFIED_NO_FORWARD");
+ assert.deepEqual(a.jobs,[{lane:"PRIMARY_BACKSTOP",jobId:42},{lane:"ROLLING_ROOT",jobId:43}]);
+ assert.equal(f.calls.filter(x=>x.method==="GET").length,8);
+ assert.equal(f.calls.filter(x=>x.method==="PUT").length,2);
+ assert([...f.store.values()].every(j=>j.enabled===false));
+ assert.equal(a.targetDispatches,0);
+ assert(!JSON.stringify([a,f.events]).includes(tok));
+});
+test("existing partial pair blocks all writes rather than recreate either member",async()=>{
+ const f=pairFixture("existingRolling");await assert.rejects(createDisabledPair(f.pair,f),/ALREADY_EXISTS/);
+ assert(f.calls.every(x=>x.method==="GET"));
+});
+test("uncertain first or second create never retries and retains prior verified receipt",async()=>{
+ for(const fault of ["firstUnknown","secondUnknown"]){
+  const f=pairFixture(fault);await assert.rejects(createDisabledPair(f.pair,f));
+  assert.equal(f.calls.filter(x=>x.method==="PUT").length,fault==="firstUnknown"?1:2);
+  assert.equal(f.events.filter(x=>x.status==="PAIR_MEMBER_DISABLED_VERIFIED").length,fault==="firstUnknown"?0:1);
+ }
+});
+test("duplicate IDs and forwarding-on config reject pair completion",async()=>{
+ const f=pairFixture("duplicateAck");await assert.rejects(createDisabledPair(f.pair,f),/PAIR_ACK_SCOPE/);
+ const g=pairFixture();g.pair.env.TRAVNR_RELAY_ROLLING_ENABLED="1";
+ await assert.rejects(createDisabledPair(g.pair,g),/PAIR_STOP_SCOPE/);assert.equal(g.calls.length,0);
+});
