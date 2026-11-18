@@ -35,11 +35,11 @@ export function validateJob(c,j){
 export function planned(c,mode,now){
  const start=time(c.from),end=time(c.until);
  if(!Number.isSafeInteger(now)||end<=start)HOLD("CLOCK");
- const lower=mode==="PILOT"?start:Math.max(start,now-120*60000-120000);
+ const lower=mode==="PILOT"?start:Math.max(start,now-180*60000-120000);
  const upper=Math.min(end,now-120000); // two minute observation grace, not collection permission
  const out=[];
  for(let t=Math.floor(lower/60000)*60000+60000;t<end&&t<=upper;t+=60000)if(mins.includes(new Date(t).getUTCMinutes()))out.push(t/1000);
- if(out.length>13)HOLD("PLAN_BOUND");
+ if(out.length>(mode==="PILOT"?9:19))HOLD("PLAN_BOUND");
  return out;
 }
 export function classify(c,slots,history){
@@ -55,7 +55,7 @@ export function classify(c,slots,history){
  }
  const rows=slots.map(p=>{
   const list=groups.get(p)??[];
-  if(list.length===0)return {planned:p,status:p*1000<=time(c.enabledReadback)?"ENABLE_BOUNDARY_UNCERTAIN":"MISSING_CRON_TICK"};
+  if(list.length===0)return {planned:p,status:p*1000<=time(c.enabledReadback)?"ENABLE_BOUNDARY_UNCERTAIN":"UNOBSERVED_CRON_TICK"};
   if(list.length!==1)return {planned:p,status:"DUPLICATE_CRON_TICK"};
   const r=list[0];if(r.status!==1||r.httpStatus!==200)return {planned:p,status:"CRON_HTTP_FAILURE",httpStatus:r.httpStatus};
   return {planned:p,status:"CRON_HTTP_ACK_ONLY",row:r};
@@ -121,7 +121,7 @@ export async function audit({c,mode,now,cron,gh,logs}){
  const proven=safe.filter(x=>x.status==="CLOCK_ONLY_PROVEN"),late=proven.filter(x=>x.plannedToRunnerMs>120000),ackOnly=safe.filter(x=>x.status==="CRON_HTTP_ACK_ONLY");
  const bad=safe.filter(x=>!["CLOCK_ONLY_PROVEN","CRON_HTTP_ACK_ONLY"].includes(x.status));
  const expired=now>=time(c.until)+120000,disabledEarly=now<time(c.until)&&!detail.enabled;
- return {status:"READONLY_CRON_AND_RELAY_AUDIT_NOT_COLLECTION_PROOF",mode,jobId:c.jobId,relayPin:c.pin,observedUtc:iso(now),expected:slots.length,proven:proven.length,ackOnly:ackOnly.length,unresolved:bad.length,unexpectedRows:unexpected,over120Seconds:late.length,expired,disabledEarly,
+ return {status:"READONLY_CRON_AND_RELAY_AUDIT_NOT_COLLECTION_PROOF",mode,jobId:c.jobId,relayPin:c.pin,observedUtc:iso(now),auditFirstPlannedUtc:slots.length?iso(slots[0]*1000):null,auditLastPlannedUtc:slots.length?iso(slots.at(-1)*1000):null,expected:slots.length,proven:proven.length,ackOnly:ackOnly.length,unresolved:bad.length,unexpectedRows:unexpected,over120Seconds:late.length,expired,disabledEarly,
   fullyProven:expired&&mode==="PILOT"&&slots.length>0&&proven.length===slots.length&&unexpected===0,
   timingTargetMet:expired&&mode==="PILOT"&&slots.length>0&&proven.length===slots.length&&unexpected===0&&late.length===0,
   maxPlannedToRunnerMs:proven.length?Math.max(...proven.map(x=>x.plannedToRunnerMs)):null,rows:safe,
@@ -130,7 +130,8 @@ export async function audit({c,mode,now,cron,gh,logs}){
 async function main(){
  const e=process.env,mode=e.TRAVNR_CRON_AUDIT_MODE;
  if(e.GITHUB_ACTIONS!=="true"||e.GITHUB_REPOSITORY!==REPO||e.GITHUB_REF!=="refs/heads/main"||
-    !["schedule","workflow_dispatch"].includes(e.GITHUB_EVENT_NAME)||e.GITHUB_RUN_ATTEMPT!=="1"||
+    !["schedule","push"].includes(e.GITHUB_EVENT_NAME)||e.GITHUB_RUN_ATTEMPT!=="1"||
+    (e.GITHUB_EVENT_NAME==="schedule"?mode!=="RECENT":mode!=="PILOT"||e.TRAVNR_CRON_PREVIOUS_RELAY_SHA!==PILOT.pin||Date.now()<time(PILOT.until)+120000)||
     e.DATABASE_URL||e.RAPIDAPI_KEY||e.AERODATABOX_API_KEY||e.TRAVNR_TARGET_ACTIONS_TOKEN||
     typeof e.TRAVNR_CRON_ACCOUNT_KEY!=="string"||e.TRAVNR_CRON_ACCOUNT_KEY.length<16||
     typeof e.GITHUB_TOKEN!=="string"||e.GITHUB_TOKEN.length<16)HOLD("RUNTIME_SCOPE");
