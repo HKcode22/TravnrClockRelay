@@ -1,0 +1,58 @@
+name: Fixed study-end Cron lease continuity (NO provider)
+on:
+  pull_request:
+    branches: [main]
+    paths: ['cron-lease-continuity.mjs','cron-lease-continuity.test.mjs','.github/workflows/cron-lease-continuity.yml']
+  schedule:
+    # Redundant opportunities inside the reviewed seven-day renewal window.
+    # Runtime enforces exact UTC dates and previous mutation evidence.
+    - cron: '21 9,17 12-18 12 *'
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: managed-cron-write-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'main' }}
+  cancel-in-progress: false
+jobs:
+  offline:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - run: node --check cron-lease-continuity.mjs && node --test cron-lease-continuity.test.mjs
+  extend-exact-existing-pair:
+    if: >-
+      github.repository == 'HKcode22/TravnrClockRelay' &&
+      github.event_name == 'schedule' && github.ref == 'refs/heads/main' &&
+      github.run_attempt == 1 && vars.TRAVNR_LEASE_CONTINUITY_ARMED == '1' &&
+      vars.TRAVNR_LEASE_ENV_READY == '1'
+    environment: travnr-cron-lease-renewal
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - name: Extend exact existing pair only, no replay
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TRAVNR_CRON_ACCOUNT_KEY: ${{ secrets.TRAVNR_CRON_ACCOUNT_KEY }}
+          TRAVNR_CRON_RELAY_TOKEN: ${{ secrets.TRAVNR_CRON_RELAY_TOKEN }}
+          TRAVNR_LEASE_CONTINUITY_ARMED: ${{ vars.TRAVNR_LEASE_CONTINUITY_ARMED }}
+          TRAVNR_LEASE_ENV_READY: ${{ vars.TRAVNR_LEASE_ENV_READY }}
+          TRAVNR_RELAY_MODE: ${{ vars.TRAVNR_RELAY_MODE }}
+          TRAVNR_RELAY_PRIMARY_ENABLED: ${{ vars.TRAVNR_RELAY_PRIMARY_ENABLED }}
+          TRAVNR_RELAY_ROLLING_ENABLED: ${{ vars.TRAVNR_RELAY_ROLLING_ENABLED }}
+          TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED: ${{ vars.TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED }}
+          TRAVNR_APPROVED_TARGET_MAIN_SHA: ${{ vars.TRAVNR_APPROVED_TARGET_MAIN_SHA }}
+          TRAVNR_ROLLING_POLICY_UNTIL_UTC: ${{ vars.TRAVNR_ROLLING_POLICY_UNTIL_UTC }}
+          TRAVNR_TARGET_ACTIONS_TOKEN: ''
+          DATABASE_URL: ''
+          AERODATABOX_API_KEY: ''
+          RAPIDAPI_KEY: ''
+        run: node cron-lease-continuity.mjs
