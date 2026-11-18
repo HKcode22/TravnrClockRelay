@@ -277,6 +277,12 @@ export function shadowRecentConfigs(e){
     [e.TRAVNR_RELAY_PRIMARY_ENABLED,e.TRAVNR_RELAY_ROLLING_ENABLED,e.TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED].some(v=>v==="1"))HOLD("SHADOW_RECENT_STOP_SCOPE");
  return repairedShadowConfigs(JSON.stringify(SHADOW_REPAIR),SHADOW_ACTIVATION_PIN).map(c=>({...c,activationPin:c.pin,pin:e.GITHUB_SHA,shadowRecent:true}));
 }
+export function auditLanes(layout){
+ if(layout==="PRIMARY_ONLY")return ["PRIMARY_BACKSTOP"];
+ if(layout==="RECOVERY_PAIR")return ["PRIMARY_BACKSTOP","ROLLING_ROOT"];
+ if(layout==="CLOCK_ONLY")return ["CLOCK_ONLY"];
+ HOLD("AUDIT_LAYOUT");
+}
 async function main(){
  const e=process.env,local=process.argv[2]==="--owner-audit-pilot",repaired=process.argv[2]==="--shadow-rekey",shadow=process.argv[2]==="--shadow-pair"||repaired,mode=local?"PILOT":shadow?"SHADOW":e.TRAVNR_CRON_AUDIT_MODE,shadowRecent=mode==="SHADOW_RECENT";
  if(local?e.GITHUB_ACTIONS==="true":e.GITHUB_ACTIONS!=="true"||e.GITHUB_REPOSITORY!==REPO||e.GITHUB_REF!=="refs/heads/main"||
@@ -286,9 +292,10 @@ async function main(){
  if(e.DATABASE_URL||e.RAPIDAPI_KEY||e.AERODATABOX_API_KEY||e.TRAVNR_TARGET_ACTIONS_TOKEN||e.NODE_TLS_REJECT_UNAUTHORIZED==="0"||
     typeof e.TRAVNR_CRON_ACCOUNT_KEY!=="string"||e.TRAVNR_CRON_ACCOUNT_KEY.length<16)HOLD("SECRET_SCOPE");
  const layout=shadow||shadowRecent?"SHADOW_PAIR":mode==="PILOT"?"CLOCK_ONLY":e.TRAVNR_CRON_AUDIT_LAYOUT||"CLOCK_ONLY";
- if(!["CLOCK_ONLY","RECOVERY_PAIR","SHADOW_PAIR"].includes(layout))HOLD("AUDIT_LAYOUT");
- const configs=(shadowRecent?shadowRecentConfigs(e):repaired?repairedShadowConfigs(e.TRAVNR_SHADOW_RECEIPT,e.GITHUB_SHA):shadow?shadowConfigs(e.TRAVNR_SHADOW_RECEIPT,e.GITHUB_SHA):(layout==="RECOVERY_PAIR"?["PRIMARY_BACKSTOP","ROLLING_ROOT"]:["CLOCK_ONLY"]).map(l=>({...config(e,mode,l),...(layout==="RECOVERY_PAIR"?{targetPin:e.TRAVNR_APPROVED_TARGET_MAIN_SHA}:{})}))).map(c=>({...c,leaseContinuity:e.TRAVNR_LEASE_CONTINUITY_ARMED==="1"&&e.TRAVNR_LEASE_ENV_READY==="1"}));
- if(layout==="RECOVERY_PAIR"&&!configs.every(c=>sha(c.targetPin)))HOLD("TARGET_AUDIT_PIN_REQUIRED");
+ if(!["CLOCK_ONLY","PRIMARY_ONLY","RECOVERY_PAIR","SHADOW_PAIR"].includes(layout))HOLD("AUDIT_LAYOUT");
+ const recoveryLayout=layout==="PRIMARY_ONLY"||layout==="RECOVERY_PAIR";
+ const configs=(shadowRecent?shadowRecentConfigs(e):repaired?repairedShadowConfigs(e.TRAVNR_SHADOW_RECEIPT,e.GITHUB_SHA):shadow?shadowConfigs(e.TRAVNR_SHADOW_RECEIPT,e.GITHUB_SHA):auditLanes(layout).map(l=>({...config(e,mode,l),...(recoveryLayout?{targetPin:e.TRAVNR_APPROVED_TARGET_MAIN_SHA}:{})}))).map(c=>({...c,leaseContinuity:e.TRAVNR_LEASE_CONTINUITY_ARMED==="1"&&e.TRAVNR_LEASE_ENV_READY==="1"}));
+ if(recoveryLayout&&!configs.every(c=>sha(c.targetPin)))HOLD("TARGET_AUDIT_PIN_REQUIRED");
  if(new Set(configs.map(x=>x.jobId)).size!==configs.length)HOLD("DUPLICATE_AUDIT_JOB");
  const allowed=new Set(configs.map(x=>String(x.jobId))),max=mode==="PILOT"||shadow?15:["RECOVERY_PAIR","SHADOW_PAIR"].includes(layout)?6:5;
  let calls=0;
@@ -311,7 +318,7 @@ async function main(){
  };
  let targetReads=0;
  const targetGh=async p=>{
-  if(layout!=="RECOVERY_PAIR"||++targetReads>4||!/^\/actions\/runs\/[1-9][0-9]{0,14}(?:\/jobs\?filter=latest&per_page=100)?$/.test(p))HOLD("PUBLIC_TARGET_READ_SCOPE");
+  if(!recoveryLayout||++targetReads>4||!/^\/actions\/runs\/[1-9][0-9]{0,14}(?:\/jobs\?filter=latest&per_page=100)?$/.test(p))HOLD("PUBLIC_TARGET_READ_SCOPE");
   const a=await fetch(TARGET_PUBLIC+p,{method:"GET",headers:{Accept:"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"},redirect:"error",signal:AbortSignal.timeout(10000)});
   if(!a.ok)HOLD("PUBLIC_TARGET_HTTP_"+a.status);return a.json();
  };
@@ -338,7 +345,7 @@ async function main(){
  for(const c of configs){
   const before=calls;
   try{
-   const out=await audit({c,mode,now:Date.now(),cron,gh,logs,targetGh:layout==="RECOVERY_PAIR"?targetGh:undefined,sampleLimit:layout==="RECOVERY_PAIR"||shadowRecent?1:3});
+   const out=await audit({c,mode,now:Date.now(),cron,gh,logs,targetGh:recoveryLayout?targetGh:undefined,sampleLimit:recoveryLayout||shadowRecent?1:3});
    leaseReadbacks.push({lane:out.lane,until:out.leaseUntilUtc});
    console.log(JSON.stringify({...out,cronApiReads:calls-before}));
    if(shadow&&!out.shadowFullyProven||shadowRecent&&out.expected>0&&out.proven!==1||out.unresolved||out.unexpectedRows||out.disabledEarly||out.over120Seconds||out.leaseHealth?.state==="RENEWAL_CRITICAL"||out.leaseHealth?.state==="EXPIRED"||(out.expired&&(mode==="RECENT"||!out.fullyProven)))process.exitCode=2;

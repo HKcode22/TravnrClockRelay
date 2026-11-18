@@ -1,9 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {PILOT,REPO,WF,config,validateJob,planned,classify,ack,verifyReceipt,samples,audit,observeTargetStep,leaseHealth,shadowConfigs,repairedShadowConfigs,shadowRecentConfigs,SHADOW_ACTIVATION_PIN,continuityConfig} from "./cron-audit.mjs";
+import {PILOT,REPO,WF,config,validateJob,planned,classify,ack,verifyReceipt,samples,audit,observeTargetStep,leaseHealth,shadowConfigs,repairedShadowConfigs,shadowRecentConfigs,auditLanes,SHADOW_ACTIVATION_PIN,continuityConfig} from "./cron-audit.mjs";
 const c=PILOT,base="https://api.github.com/repos/"+REPO,url=base+"/actions/workflows/"+WF+"/dispatches";
 const now=Date.parse("2026-11-18T07:56:00Z"),slots=planned(c,"PILOT",now),p=slots[0];
 const row=(s=p,n=1)=>({jobId:c.jobId,datePlanned:s,date:s+1,jitter:1200,identifier:"history-"+n,url,status:1,httpStatus:200});
+test("primary-only audit selects the commissioned lane without rolling forwarding",()=>{
+ assert.deepEqual(auditLanes("PRIMARY_ONLY"),["PRIMARY_BACKSTOP"]);
+ assert.deepEqual(auditLanes("RECOVERY_PAIR"),["PRIMARY_BACKSTOP","ROLLING_ROOT"]);
+ assert.throws(()=>auditLanes("ROLLING_ONLY"),/AUDIT_LAYOUT/);
+});
 const job={jobId:c.jobId,title:c.title,url,enabled:true,requestMethod:1,type:0,saveResponses:true,redirectSuccess:false,requestTimeout:30,auth:{enable:false},
  schedule:{timezone:"UTC",expiresAt:20261118075306,hours:[-1],mdays:[-1],months:[-1],wdays:[-1],minutes:[2,12,22,32,42,52]},
  extendedData:{headers:{Authorization:"Bearer github_pat_"+"x".repeat(40),Accept:"application/vnd.github+json","Content-Type":"application/json","X-GitHub-Api-Version":"2022-11-28"},body:JSON.stringify({ref:"main",return_run_details:true})},
