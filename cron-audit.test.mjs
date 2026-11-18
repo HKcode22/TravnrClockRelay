@@ -104,9 +104,10 @@ test("shadow scope exact pair activation receipt verified; wrong ID/forward auth
 test("shadow clock requires actual shadow receipt AND skipped target-forward job",()=>{
  const a=mk(),q={...c,lane:"PRIMARY_BACKSTOP",shadow:true},run={...a.run,display_title:"TRAVNR EXTERNAL CLOCK PRIMARY_BACKSTOP"};
  const forward={...a.jobs.jobs[0],id:222,name:"target-forward",conclusion:"skipped",steps:[]};
- const jobs={total_count:2,jobs:[a.jobs.jobs[0],forward]};
+ const offline={...forward,id:223,name:"offline-tests"};
+ const jobs={total_count:3,jobs:[a.jobs.jobs[0],forward,offline]};
  const log=JSON.stringify({...a.receipt,status:"EXTERNAL_RECOVERY_LANE_SHADOW_OBSERVED_NO_TARGET_DISPATCH",mode:"PRIMARY_BACKSTOP",relayDispatches:0});
  assert.equal(verifyReceipt(q,a.r,101,run,jobs,log).status,"SHADOW_LANE_PROVEN_NO_FORWARD");
- assert.throws(()=>verifyReceipt(q,a.r,101,run,{total_count:2,jobs:[jobs.jobs[0],{...forward,conclusion:"success"}]},log),/SHADOW_FORWARD_NOT_SKIPPED/);
+ assert.throws(()=>verifyReceipt(q,a.r,101,run,{total_count:3,jobs:[jobs.jobs[0],{...forward,conclusion:"success"},offline]},log),/SHADOW_FORWARD_NOT_SKIPPED/);
  assert.throws(()=>verifyReceipt(q,a.r,101,run,jobs,a.log),/RECEIPT_COUNT/);
 });
