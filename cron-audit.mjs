@@ -84,6 +84,10 @@ export function verifyReceipt(c,r,n,run,jobs,log){
  if(run.conclusion!=="success")return {status:"RELAY_FAILED",runId:n};
  if(!Array.isArray(jobs?.jobs)||jobs.total_count!==jobs.jobs.length||jobs.jobs.length>100)HOLD("JOBS");
  if(c.shadow){
+  const named=new Map(jobs.jobs.map(j=>[j.name,j]));
+  if(jobs.total_count!==3||named.size!==3||new Set(jobs.jobs.map(j=>j.id)).size!==3||!["offline-tests","independent-pulse","target-forward"].every(k=>named.has(k))||
+     !jobs.jobs.every(j=>id(j.id)&&j.run_id===n&&j.head_sha===c.pin&&j.run_attempt===1&&j.status==="completed")||
+     named.get("offline-tests").conclusion!=="skipped"||!(named.get("offline-tests").steps==null||Array.isArray(named.get("offline-tests").steps)&&named.get("offline-tests").steps.length===0))HOLD("SHADOW_JOB_SCOPE");
   const forward=jobs.jobs.filter(j=>j.name==="target-forward");
   if(forward.length!==1||!id(forward[0].id)||forward[0].run_id!==n||forward[0].head_sha!==c.pin||forward[0].run_attempt!==1||
      forward[0].status!=="completed"||forward[0].conclusion!=="skipped"||!(forward[0].steps==null||Array.isArray(forward[0].steps)&&forward[0].steps.length===0))HOLD("SHADOW_FORWARD_NOT_SKIPPED");
