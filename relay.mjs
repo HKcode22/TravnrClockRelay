@@ -112,11 +112,29 @@ export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep
  let reads=0,attempted=false;
  const auth=token=>({Accept:"application/vnd.github+json",Authorization:"Bearer "+token,"X-GitHub-Api-Version":"2022-11-28"});
  const get=async(repo,path)=>{
-  if(++reads>40||now()-start>180000||!path.startsWith("/")||path.startsWith("//"))HOLD("READ_BOUND");
   const token=repo===RELAY?env.GITHUB_TOKEN:env.TRAVNR_TARGET_ACTIONS_TOKEN;
-  const res=await fetcher(ROOT+repo+path,{method:"GET",headers:auth(token),redirect:"error",signal:AbortSignal.timeout(10000)});
-  if(!res.ok)HOLD("GET_HTTP_"+res.status);
-  return res.json();
+  // Only bounded read-only preflight retries; the existing independent ACK
+  // readback loop is unchanged. Every physical GET consumes the same budget.
+  for(let i=0;;i++){
+   if(++reads>40||now()-start>180000||!path.startsWith("/")||path.startsWith("//"))HOLD("READ_BOUND");
+   let res,transport=false;
+   try{
+    res=await fetcher(ROOT+repo+path,{method:"GET",headers:auth(token),redirect:"error",signal:AbortSignal.timeout(10000)});
+   }catch(e){
+    if(!(e instanceof TypeError)&&!["TimeoutError","AbortError"].includes(e?.name))throw e;
+    transport=true;
+   }
+   if(res?.ok)return res.json();
+   const status=transport?"TRANSPORT":"HTTP_"+res.status;
+   const ra=res?.headers?.get?.("retry-after");
+   // A 429 without an explicitly short retry-after is not retried. Longer
+   // provider advice is respected by deferring to the next scheduler pulse.
+   const wait=ra==null?1000*(i+1):/^\d+$/.test(ra)&&Number(ra)<=3?Math.max(1000,Number(ra)*1000):null;
+   const transient=transport||[502,503,504].includes(res?.status)||res?.status===429&&ra!=null;
+   if(attempted||i>=2||!transient||wait===null||reads>=40||now()-start+wait+10000>120000)HOLD("GET_"+status);
+   emit({status:"EXTERNAL_WAKE_PREFLIGHT_GET_RETRY_NO_POST",mode,relayRunId:runId,attempt:i+1,reason:status,waitMs:wait});
+   await sleep(wait);
+  }
  };
  const complete=(x,key)=>{if(!Number.isSafeInteger(x?.total_count)||x.total_count<0||x.total_count>100||!Array.isArray(x[key])||x[key].length!==x.total_count)HOLD("HISTORY_INCOMPLETE");return x[key];};
  const exact=(r,wf,repo)=>{if(!id(r?.id)||r.path!==".github/workflows/"+wf||r.head_branch!=="main"||!sha(r.head_sha)||

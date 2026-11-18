@@ -121,3 +121,53 @@ test("each shadow recovery clock is secret-free and touches only its own run met
   await assert.rejects(runPulse({...x.env,TRAVNR_TARGET_ACTIONS_TOKEN:tok},x.opts),/SCOPE/);
  }
 });
+
+test("transient preflight GET failures recover without retrying a target POST",async()=>{
+ for(const fault of [502,503,504,"transport","timeout",429]){
+  const x=multi("PRIMARY_BACKSTOP");let failed=0;const get=x.opts.fetcher;
+  x.opts.fetcher=async(url,init)=>{
+   if(init.method==="GET"&&url===root+TARGET+"/git/ref/heads/main"&&failed<2){
+    failed++;
+    if(fault==="transport")throw new TypeError("synthetic transport failure");
+    if(fault==="timeout")throw new DOMException("synthetic timeout","TimeoutError");
+    return {...wrap({},fault),headers:new Headers(fault===429?{"retry-after":"1"}:{})};
+   }
+   return get(url,init);
+  };
+  assert.equal((await runPulse(x.env,x.opts)).targetRunId,201);
+  assert.equal(failed,2);assert.equal(x.posts(),1);
+  assert.equal(x.events.filter(e=>e.status==="EXTERNAL_WAKE_PREFLIGHT_GET_RETRY_NO_POST").length,2);
+ }
+});
+test("exhausted transient GET never dispatches and has a bounded attempt count",async()=>{
+ const x=multi("PRIMARY_BACKSTOP");let n=0;const get=x.opts.fetcher;
+ x.opts.fetcher=async(url,init)=>init.method==="GET"&&url===root+TARGET+"/git/ref/heads/main"?(n++,wrap({},503)):get(url,init);
+ const r=await runPulse(x.env,x.opts);
+ assert.equal(r.reason,"HOLD_EXTERNAL_CLOCK_GET_HTTP_503");assert.equal(n,3);assert.equal(x.posts(),0);
+});
+test("hard authorization and long or unspecified rate limits do not retry",async()=>{
+ for(const [status,retry] of [[401,null],[403,null],[404,null],[429,null],[429,"60"],[503,"60"]]){
+  const x=multi("PRIMARY_BACKSTOP");let n=0;const get=x.opts.fetcher;
+  x.opts.fetcher=async(url,init)=>init.method==="GET"&&url===root+TARGET+"/git/ref/heads/main"?(n++,{...wrap({},status),headers:new Headers(retry==null?{}:{"retry-after":retry})}):get(url,init);
+  const r=await runPulse(x.env,x.opts);
+  assert.equal(r.reason,"HOLD_EXTERNAL_CLOCK_GET_HTTP_"+status);assert.equal(n,1);assert.equal(x.posts(),0);
+ }
+});
+test("readback after a single acknowledged POST retains original four GET limit",async()=>{
+ const x=multi("PRIMARY_BACKSTOP");let n=0;const get=x.opts.fetcher;
+ x.opts.fetcher=async(url,init)=>init.method==="GET"&&url===root+TARGET+"/actions/runs/201"?(n++,wrap({},503)):get(url,init);
+ await assert.rejects(runPulse(x.env,x.opts),/NO_BLIND_REPLAY/);
+ assert.equal(n,4);assert.equal(x.posts(),1);
+ assert.equal(x.events.filter(e=>e.status==="EXTERNAL_WAKE_PREFLIGHT_GET_RETRY_NO_POST").length,0);
+});
+test("retry delay cannot move preflight beyond the existing two-minute admission bound",async()=>{
+ const x=multi("PRIMARY_BACKSTOP");let clock=NOW,n=0;const get=x.opts.fetcher;
+ x.opts.now=()=>clock;
+ x.opts.fetcher=async(url,init)=>{
+  if(init.method==="GET"&&url===root+TARGET+"/git/ref/heads/main"){
+   n++;clock=NOW+119000;return wrap({},503);
+  }
+  return get(url,init);
+ };
+ const r=await runPulse(x.env,x.opts);assert.equal(r.reason,"HOLD_EXTERNAL_CLOCK_GET_HTTP_503");assert.equal(n,1);assert.equal(x.posts(),0);
+});
