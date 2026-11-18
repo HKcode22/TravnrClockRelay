@@ -180,10 +180,11 @@ export async function observeTargetStep(c,targetRunId,targetGh){
  if(verify)return {status:"RELAY_TARGET_READONLY_DIRECT_VERIFY_EXECUTED_NO_COLLECTION_PROOF",targetRunId,targetJobId:j.id,targetPin:c.targetPin};
  if(!primary&&j.steps?.filter(s=>s.name===(direct?"Preserve direct terminal operational receipt":"Preserve terminal operational receipt for independently reviewed continuation")&&s.conclusion==="success"&&s.status==="completed").length!==1)HOLD("TARGET_TERMINAL_RECEIPT_STEP");
  if(direct){
-  const markers=["Direct outcome TERMINAL_PARENT_ACKS_RECONCILED","Direct outcome PREFLIGHT_HOLD_NO_POST"].map(name=>j.steps?.filter(s=>s.name===name)??[]);
+  const markers=["Direct outcome TERMINAL_PARENT_ACKS_RECONCILED","Direct outcome PREFLIGHT_HOLD_NO_POST","Direct outcome KNOWN_ACTIVE_PARENT_ACKS_CARRIED"].map(name=>j.steps?.filter(s=>s.name===name)??[]);
   if(markers.some(x=>x.length!==1||x[0].status!=="completed"||!["success","skipped"].includes(x[0].conclusion))||
      markers.filter(x=>x[0].conclusion==="success").length!==1)HOLD("DIRECT_TARGET_DISPOSITION");
   if(markers[1][0].conclusion==="success")return {status:"RELAY_TARGET_DIRECT_PREFLIGHT_HOLD_NO_POST",targetRunId,targetJobId:j.id,targetPin:c.targetPin};
+  if(markers[2][0].conclusion==="success")return {status:"RELAY_TARGET_DIRECT_KNOWN_ACTIVE_CUSTODY_NOT_TERMINAL_PROOF",targetRunId,targetJobId:j.id,targetPin:c.targetPin};
  }
  return {status:"RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF",targetRunId,targetJobId:j.id,targetPin:c.targetPin};
 }
@@ -239,10 +240,11 @@ export async function audit({c,mode,now,cron,gh,logs,targetGh,sampleLimit=3}){
  }
  const safe=rows.map(({row,...x})=>({...x,plannedUtc:iso(x.planned*1000)}));
  const proven=safe.filter(x=>x.status===(c.shadow?"SHADOW_LANE_PROVEN_NO_FORWARD":"CLOCK_ONLY_PROVEN")),timed=safe.filter(x=>Number.isFinite(x.plannedToRunnerMs)),late=timed.filter(x=>x.plannedToRunnerMs>120000),ackOnly=safe.filter(x=>x.status==="CRON_HTTP_ACK_ONLY");
- const relayTargetAcks=safe.filter(x=>id(x.targetRunId)).length,relayTargetExecutions=safe.filter(x=>x.status==="RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF"||x.status==="RELAY_TARGET_READONLY_DIRECT_VERIFY_EXECUTED_NO_COLLECTION_PROOF").length,relayDefers=safe.filter(x=>x.status==="RELAY_OBSERVED_DEFER_NO_WORK_PROOF").length;
- const bad=safe.filter(x=>!["CLOCK_ONLY_PROVEN","SHADOW_LANE_PROVEN_NO_FORWARD","CRON_HTTP_ACK_ONLY","RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF","RELAY_TARGET_READONLY_DIRECT_VERIFY_EXECUTED_NO_COLLECTION_PROOF","RELAY_OBSERVED_DEFER_NO_WORK_PROOF"].includes(x.status));
+ const relayTargetAcks=safe.filter(x=>id(x.targetRunId)).length,relayTargetExecutions=safe.filter(x=>x.status==="RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF"||x.status==="RELAY_TARGET_READONLY_DIRECT_VERIFY_EXECUTED_NO_COLLECTION_PROOF").length,relayDefers=safe.filter(x=>x.status==="RELAY_OBSERVED_DEFER_NO_WORK_PROOF").length,
+  directKnownActiveCustody=safe.filter(x=>x.status==="RELAY_TARGET_DIRECT_KNOWN_ACTIVE_CUSTODY_NOT_TERMINAL_PROOF").length;
+ const bad=safe.filter(x=>!["CLOCK_ONLY_PROVEN","SHADOW_LANE_PROVEN_NO_FORWARD","CRON_HTTP_ACK_ONLY","RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF","RELAY_TARGET_READONLY_DIRECT_VERIFY_EXECUTED_NO_COLLECTION_PROOF","RELAY_TARGET_DIRECT_KNOWN_ACTIVE_CUSTODY_NOT_TERMINAL_PROOF","RELAY_OBSERVED_DEFER_NO_WORK_PROOF"].includes(x.status));
  const expired=now>=time(c.until)+120000,disabledEarly=now<time(c.until)&&!detail.enabled;
- return {status:"READONLY_CRON_AND_RELAY_AUDIT_NOT_COLLECTION_PROOF",mode,lane:laneOf(c),jobId:c.jobId,relayPin:c.pin,observedUtc:iso(now),auditFirstPlannedUtc:slots.length?iso(slots[0]*1000):null,auditLastPlannedUtc:slots.length?iso(slots.at(-1)*1000):null,expected:slots.length,proven:proven.length,ackOnly:ackOnly.length,relayTargetAcks,relayTargetExecutions,relayDefers,unresolved:bad.length,unexpectedRows:unexpected,over120Seconds:late.length,expired,disabledEarly,
+ return {status:"READONLY_CRON_AND_RELAY_AUDIT_NOT_COLLECTION_PROOF",mode,lane:laneOf(c),jobId:c.jobId,relayPin:c.pin,observedUtc:iso(now),auditFirstPlannedUtc:slots.length?iso(slots[0]*1000):null,auditLastPlannedUtc:slots.length?iso(slots.at(-1)*1000):null,expected:slots.length,proven:proven.length,ackOnly:ackOnly.length,relayTargetAcks,relayTargetExecutions,relayDefers,directKnownActiveCustody,unresolved:bad.length,unexpectedRows:unexpected,over120Seconds:late.length,expired,disabledEarly,
   leaseHealth:leaseHealth(c,mode,now),leaseUntilUtc:detail.expiresAt,
   shadowFullyProven:mode==="SHADOW"&&c.shadow===true&&slots.length>=(laneOf(c)==="PRIMARY_BACKSTOP"?3:5)&&proven.length===slots.length&&unexpected===0&&late.length===0&&!disabledEarly,
   fullyProven:expired&&mode==="PILOT"&&slots.length>0&&proven.length===slots.length&&unexpected===0,

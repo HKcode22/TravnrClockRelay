@@ -45,7 +45,7 @@ function f(mode,fault=""){
   if(wf===DIRECT&&url.includes("/actions/workflows/"+DIRECT+"/runs?")&&url.includes("&created=")){
    const q=new URL(url),status=q.searchParams.get("status");
    if(fault==="directPriorFailure"&&status==="failure")return wrap({total_count:1,workflow_runs:[{...row(113,DIRECT),conclusion:"failure",display_title:DIRECT_TITLE}]});
-   if(["directRecent","directOld","directMissingMarker","directSafeHold"].includes(fault)&&status==="success"){
+   if(["directRecent","directOld","directMissingMarker","directSafeHold","directCarried"].includes(fault)&&status==="success"){
     const created=fault==="directRecent"?NOW-3*60000:NOW-15*60000;
     return wrap({total_count:1,workflow_runs:[{...row(113,DIRECT),created_at:new Date(created).toISOString(),display_title:env.TRAVNR_RELAY_ROLLING_ROUTE==="DIRECT_VERIFY"?DIRECT_VERIFY_TITLE:DIRECT_TITLE}]});
    }
@@ -55,7 +55,7 @@ function f(mode,fault=""){
    const mk=(name,conclusion="success")=>({name,status:"completed",conclusion});
    const j={id:511,name:"direct-protected-recovery-tick",run_id:113,head_sha:SHA,run_attempt:1,status:"completed",conclusion:"success",
     steps:[mk("Execute one direct recovery wave and reconcile exact parent ACKs"),mk("Preserve direct terminal operational receipt"),
-     mk("Direct outcome TERMINAL_PARENT_ACKS_RECONCILED",fault==="directSafeHold"?"skipped":"success"),mk("Direct outcome PREFLIGHT_HOLD_NO_POST",fault==="directSafeHold"?"success":"skipped")]};
+     mk("Direct outcome TERMINAL_PARENT_ACKS_RECONCILED",["directSafeHold","directCarried"].includes(fault)?"skipped":"success"),mk("Direct outcome PREFLIGHT_HOLD_NO_POST",fault==="directSafeHold"?"success":"skipped"),mk("Direct outcome KNOWN_ACTIVE_PARENT_ACKS_CARRIED",fault==="directCarried"?"success":"skipped")]};
    if(fault==="directMissingMarker")j.steps.pop();
    
    if(env.TRAVNR_RELAY_ROLLING_ROUTE==="DIRECT_VERIFY"){j.name="direct-readonly-verify";j.steps=[mk("Verify exact direct wake and existing workflow metadata NO POST")];}
@@ -201,7 +201,7 @@ function directFixture(fault="directFresh"){
  return x;
 }
 test("direct route is one fixed target POST, independent of V0102 or root scope",async()=>{
- for(const fault of ["directFresh","directOld","directSafeHold"]){
+ for(const fault of ["directFresh","directOld","directSafeHold","directCarried"]){
   const x=directFixture(fault);const r=await runPulse(x.env,x.opts);
   assert.equal(r.targetWorkflow,DIRECT);assert.equal(r.targetRunId,201);assert.equal(x.posts(),1);
   assert.deepEqual(x.body().inputs,{confirm:DIRECT_CONFIRM,approved_main_sha:SHA});

@@ -119,10 +119,10 @@ export function directTargetDisposition(run,jobs,verify=false){
  if(
     !["Execute one direct recovery wave and reconcile exact parent ACKs","Preserve direct terminal operational receipt"].every(name=>
       p.steps.filter(s=>s.name===name&&s.status==="completed"&&s.conclusion==="success").length===1))return null;
- const marks=["Direct outcome TERMINAL_PARENT_ACKS_RECONCILED","Direct outcome PREFLIGHT_HOLD_NO_POST"].map(name=>p.steps.filter(s=>s.name===name));
+ const marks=["Direct outcome TERMINAL_PARENT_ACKS_RECONCILED","Direct outcome PREFLIGHT_HOLD_NO_POST","Direct outcome KNOWN_ACTIVE_PARENT_ACKS_CARRIED"].map(name=>p.steps.filter(s=>s.name===name));
  if(marks.some(x=>x.length!==1||x[0].status!=="completed"||!["success","skipped"].includes(x[0].conclusion))||
     marks.filter(x=>x[0].conclusion==="success").length!==1)return null;
- return marks[0][0].conclusion==="success"?"TERMINAL":"PREFLIGHT_HOLD";
+ return ["TERMINAL","PREFLIGHT_HOLD","CARRIED"][marks.findIndex(x=>x[0].conclusion==="success")];
 }
 export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep=ms=>new Promise(r=>setTimeout(r,ms))}={}){
  const configured=env.TRAVNR_RELAY_MODE||"CLOCK_ONLY", lane=env.TRAVNR_RELAY_LANE||"CLOCK_ONLY",

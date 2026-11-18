@@ -159,14 +159,18 @@ test("direct target audit distinguishes a reconciled wave from green preflight H
   path:".github/workflows/phase6-direct-recovery-tick.yml",run_attempt:1,status:"completed",conclusion:"success"};
  const mk=(name,conclusion="success")=>({name,conclusion,status:"completed"});
  const j={id:888,name:"direct-protected-recovery-tick",run_id:n,head_sha:pin,run_attempt:1,status:"completed",conclusion:"success",
-  steps:[mk("Execute one direct recovery wave and reconcile exact parent ACKs"),mk("Preserve direct terminal operational receipt"),mk("Direct outcome TERMINAL_PARENT_ACKS_RECONCILED"),mk("Direct outcome PREFLIGHT_HOLD_NO_POST","skipped")]};
+  steps:[mk("Execute one direct recovery wave and reconcile exact parent ACKs"),mk("Preserve direct terminal operational receipt"),mk("Direct outcome TERMINAL_PARENT_ACKS_RECONCILED"),mk("Direct outcome PREFLIGHT_HOLD_NO_POST","skipped"),mk("Direct outcome KNOWN_ACTIVE_PARENT_ACKS_CARRIED","skipped")]};
  const skip={...j,id:889,name:"offline-direct-recovery",conclusion:"skipped",steps:[]};
  
  const other={...skip,id:890,name:"direct-readonly-verify"};
  const get=job=>async path=>path.includes("/jobs")?{total_count:3,jobs:[job,skip,other]}:row;
  assert.equal((await observeTargetStep(q,n,get(j))).status,"RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF");
- const hold={...j,steps:[...j.steps.slice(0,2),mk("Direct outcome TERMINAL_PARENT_ACKS_RECONCILED","skipped"),mk("Direct outcome PREFLIGHT_HOLD_NO_POST")]};
+ const hold={...j,steps:[...j.steps.slice(0,2),mk("Direct outcome TERMINAL_PARENT_ACKS_RECONCILED","skipped"),mk("Direct outcome PREFLIGHT_HOLD_NO_POST"),mk("Direct outcome KNOWN_ACTIVE_PARENT_ACKS_CARRIED","skipped")]};
  assert.equal((await observeTargetStep(q,n,get(hold))).status,"RELAY_TARGET_DIRECT_PREFLIGHT_HOLD_NO_POST");
+ const carried={...j,steps:[...j.steps.slice(0,2),mk("Direct outcome TERMINAL_PARENT_ACKS_RECONCILED","skipped"),
+  mk("Direct outcome PREFLIGHT_HOLD_NO_POST","skipped"),mk("Direct outcome KNOWN_ACTIVE_PARENT_ACKS_CARRIED")]};
+ assert.equal((await observeTargetStep(q,n,get(carried))).status,"RELAY_TARGET_DIRECT_KNOWN_ACTIVE_CUSTODY_NOT_TERMINAL_PROOF");
+ await assert.rejects(observeTargetStep(q,n,get({...carried,steps:carried.steps.map(x=>({...x,conclusion:"success"}))})),/DIRECT_TARGET_DISPOSITION/);
  await assert.rejects(observeTargetStep(q,n,get({...j,steps:j.steps.slice(0,3)})),/DIRECT_TARGET_DISPOSITION/);
  await assert.rejects(observeTargetStep({...q,directTick:false},n,get(j)),/TARGET_RUN_IDENTITY/);
 });
