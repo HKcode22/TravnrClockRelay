@@ -1,0 +1,63 @@
+name: Autonomous bounded recovery path rehearsal (NO paid)
+on:
+  pull_request:
+    branches: [main]
+    paths: ['autonomous-lane-rehearsal.mjs','autonomous-lane-rehearsal.test.mjs','.github/workflows/autonomous-lane-rehearsal.yml']
+  push:
+    branches: [main]
+    paths: ['autonomous-lane-rehearsal.mjs','.github/workflows/autonomous-lane-rehearsal.yml']
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: autonomous-lane-rehearsal-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'one-shot' }}
+  cancel-in-progress: false
+jobs:
+  fixtures:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - run: node --check autonomous-lane-rehearsal.mjs && node --test autonomous-lane-rehearsal.test.mjs
+  actual-lane-rehearsal:
+    if: >-
+      github.repository == 'HKcode22/TravnrClockRelay' &&
+      github.ref == 'refs/heads/main' && github.event_name == 'push' &&
+      github.event.before == 'b53c43de45c56d439525e72d0233e71770176f24' &&
+      github.run_attempt == 1 && vars.TRAVNR_RELAY_MODE == 'CLOCK_ONLY' &&
+      vars.TRAVNR_RELAY_PRIMARY_ENABLED != '1' && vars.TRAVNR_RELAY_ROLLING_ENABLED != '1' &&
+      vars.TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED != '1'
+    environment: travnr-target-forward
+    runs-on: ubuntu-latest
+    timeout-minutes: 26
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        lane: [PRIMARY_BACKSTOP, ROLLING_ROOT]
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - name: Verify completed shadow audit and execute only exact nonpaid lane rehearsal
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TRAVNR_TARGET_ACTIONS_TOKEN: ${{ secrets.TRAVNR_TARGET_ACTIONS_TOKEN }}
+          TRAVNR_TARGET_FORWARD_ENV_READY: ${{ vars.TRAVNR_TARGET_FORWARD_ENV_READY }}
+          TRAVNR_REHEARSAL_PREVIOUS_SHA: ${{ github.event.before }}
+          TRAVNR_EXERCISE_LANE: ${{ matrix.lane }}
+          TRAVNR_RELAY_MODE: ${{ vars.TRAVNR_RELAY_MODE }}
+          TRAVNR_RELAY_PRIMARY_ENABLED: ${{ vars.TRAVNR_RELAY_PRIMARY_ENABLED }}
+          TRAVNR_RELAY_ROLLING_ENABLED: ${{ vars.TRAVNR_RELAY_ROLLING_ENABLED }}
+          TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED: ${{ vars.TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED }}
+          TRAVNR_CRON_ACCOUNT_KEY: ''
+          TRAVNR_CRON_RELAY_TOKEN: ''
+          DATABASE_URL: ''
+          AERODATABOX_API_KEY: ''
+          RAPIDAPI_KEY: ''
+        run: node autonomous-lane-rehearsal.mjs
