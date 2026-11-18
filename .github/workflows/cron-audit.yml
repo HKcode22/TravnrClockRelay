@@ -33,7 +33,7 @@ jobs:
           const repo="HKcode22/TravnrClockRelay";
           const root="https://api.github.com/repos/"+repo;
           try{
-            const r=await fetch(root+"/actions/workflows/external-clock.yml/runs?branch=main&event=workflow_dispatch&per_page=100&created="+encodeURIComponent(">=2026-11-18T06:23:10Z"),{headers:{Authorization:"Bearer "+process.env.GH_TOKEN,Accept:"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"},redirect:"error",signal:AbortSignal.timeout(10000)});
+            const r=await fetch(root+"/actions/workflows/external-clock.yml/runs?branch=main&event=workflow_dispatch&per_page=100&created="+encodeURIComponent(">="+new Date(Date.now()-3*3600000).toISOString()),{headers:{Authorization:"Bearer "+process.env.GH_TOKEN,Accept:"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"},redirect:"error",signal:AbortSignal.timeout(10000)});
             if(!r.ok)throw Error("HTTP_"+r.status);
             const q=await r.json();
             if(!Number.isSafeInteger(q.total_count)||q.total_count>100||q.workflow_runs?.length!==q.total_count)throw Error("HISTORY");
@@ -84,6 +84,8 @@ jobs:
           TRAVNR_CRON_ROLLING_ENABLED_UTC: ${{ vars.TRAVNR_CRON_ROLLING_ENABLED_UTC }}
           TRAVNR_CRON_ROLLING_UNTIL_UTC: ${{ vars.TRAVNR_CRON_ROLLING_UNTIL_UTC }}
           TRAVNR_APPROVED_TARGET_MAIN_SHA: ${{ vars.TRAVNR_APPROVED_TARGET_MAIN_SHA }}
+          TRAVNR_LEASE_CONTINUITY_ARMED: ${{ vars.TRAVNR_LEASE_CONTINUITY_ARMED }}
+          TRAVNR_LEASE_ENV_READY: ${{ vars.TRAVNR_LEASE_ENV_READY }}
           TRAVNR_TARGET_ACTIONS_TOKEN: ''
           DATABASE_URL: ''
           AERODATABOX_API_KEY: ''
