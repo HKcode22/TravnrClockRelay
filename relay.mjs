@@ -84,6 +84,22 @@ export function verifyPrimaryBootstrapReceipt(run,jobs,log,expectedSha,runId,clo
   HOLD("PRIMARY_BOOTSTRAP_VERIFY_RECEIPT_REVIEW");
  return {verifiedRunId:runId,verifiedJobId:j.id,observedAtUtc:iso(seen)};
 }
+/** Exact same-code failed run where the only forwarding step did not execute.
+ * Do not infer absence from missing step lists on an assigned runner. */
+export function provesNoTargetStep(run,jobs){
+ if(!run||!Number.isSafeInteger(run.id)||!sha(run.head_sha)||run.status!=="completed"||run.run_attempt!==1||
+    !Array.isArray(jobs)||jobs.length!==3||new Set(jobs.map(j=>j.id)).size!==3||
+    !jobs.every(j=>id(j.id)&&j.run_id===run.id&&j.head_sha===run.head_sha&&j.run_attempt===1&&j.status==="completed"))return false;
+ const named=new Map(jobs.map(j=>[j.name,j]));
+ if(named.size!==3||!["offline-tests","independent-pulse","target-forward"].every(k=>named.has(k)))return false;
+ if(!["offline-tests","independent-pulse"].every(k=>{const j=named.get(k);return j.conclusion==="skipped"&&(j.steps==null||Array.isArray(j.steps)&&j.steps.length===0)}))return false;
+ const j=named.get("target-forward");
+ if(j.conclusion==="skipped")return j.steps==null||Array.isArray(j.steps)&&j.steps.length===0;
+ if(!["failure","cancelled","timed_out"].includes(j.conclusion)||!Array.isArray(j.steps)||j.steps.length>20)return false;
+ const step=j.steps.filter(s=>s.name==="Run node cli.mjs");
+ return step.length===1&&step[0].status==="completed"&&step[0].conclusion==="skipped"&&
+   (step[0].started_at==null||step[0].started_at===step[0].completed_at);
+}
 export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep=ms=>new Promise(r=>setTimeout(r,ms))}={}){
  const configured=env.TRAVNR_RELAY_MODE||"CLOCK_ONLY", lane=env.TRAVNR_RELAY_LANE||"CLOCK_ONLY",
   multi=configured==="MULTI_LANE", mode=multi?lane:configured, start=now(),runId=Number(env.GITHUB_RUN_ID);
@@ -134,10 +150,19 @@ export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep
      const other=exact(row,SELF,RELAY);
      if(other.status!=="completed"||other.conclusion!==conclusion||
         Date.parse(other.created_at)<Math.floor(since/1000)*1000)HOLD("PRIOR_RELAY_HISTORY");
-     // Only a known other lane's terminal failure may be ignored. A same
-     // or unidentified lane failure is quarantined, never inferred safe.
-     if(other.display_title===laneTitle(lane)||!MULTI_LANES.some(l=>other.display_title===laneTitle(l)))
+     // Known other-lane failures do not couple the two recovery paths.
+     // For this lane, only exact current-code job metadata proving the
+     // *sole* target-capable step was skipped can remove quarantine.
+     // Any started/ambiguous step, old code, missing job or unknown title
+     // stays quarantined. No assumption from a failed workflow status.
+     if(!MULTI_LANES.some(l=>other.display_title===laneTitle(l)))
       return result("QUARANTINED_PRIOR_RELAY_RUN_REVIEW",clock);
+     if(other.display_title===laneTitle(lane)){
+      if(other.head_sha!==env.GITHUB_SHA)return result("QUARANTINED_PRIOR_RELAY_RUN_REVIEW",clock);
+      const jobs=complete(await get(RELAY,"/actions/runs/"+other.id+"/jobs?filter=latest&per_page=100"),"jobs");
+      if(!provesNoTargetStep(other,jobs))return result("QUARANTINED_PRIOR_RELAY_RUN_REVIEW",clock);
+      emit({status:"PRIOR_RELAY_FAILURE_EXACT_TARGET_STEP_SKIPPED_NO_POST",priorRelayRunId:other.id,mode});
+     }
     }
    }
   }
