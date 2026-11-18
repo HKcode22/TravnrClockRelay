@@ -4,8 +4,8 @@
  * not the read-only audit or existing protected management environment. */
 import {resolve} from "node:path";
 import {fileURLToPath} from "node:url";
-import {ACTUAL_PAIR,managedSpec,exactManaged} from "./cron-admin.mjs";
-import {REPO,WF} from "./cron-audit.mjs";
+import {ACTUAL_PAIR,LANES,managedSpec,exactManaged} from "./cron-admin.mjs";
+import {REPO,WF,PILOT} from "./cron-audit.mjs";
 export const OLD="2026-12-19T08:00:00.000Z",EXTENDED="2026-12-27T08:00:00.000Z";
 export const RENEW_FROM="2026-12-12T08:00:00.000Z",RENEW_LAST="2026-12-19T07:30:00.000Z";
 const HOL=s=>{throw Error("HOLD_LEASE_CONTINUITY_"+s)},sha=s=>typeof s==="string"&&/^[a-f0-9]{40}$/.test(s),id=x=>Number.isSafeInteger(x)&&x>0;
@@ -31,6 +31,8 @@ export async function renewPair({env,now,priorRisk},{request,main,emit=()=>{},pr
  await stable();
  const l=await request("GET","/jobs");
  if(l?.someFailed!==false||!Array.isArray(l.jobs)||l.jobs.length>100)HOL("ACCOUNT_LIST");
+ const dest=ROOT+"/actions/workflows/"+WF+"/dispatches",known=new Set(Object.values(LANES).map(x=>x.title));
+ if(l.jobs.some(j=>known.has(j.title)&&j.url!==dest||j.url===dest&&!known.has(j.title)&&!(j.jobId===PILOT.jobId&&j.title===PILOT.title&&Date.parse(PILOT.until)<now)))HOL("ACCOUNT_DESTINATION_DRIFT");
  const get=async i=>{
   const x=ACTUAL_PAIR[i],s=specs[i],j=(await request("GET","/jobs/"+x.jobId)).jobDetails;
   const matches=l.jobs.filter(k=>k.title===s.old.title);
