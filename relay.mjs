@@ -102,11 +102,11 @@ export function provesNoTargetStep(run,jobs){
 }
 export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep=ms=>new Promise(r=>setTimeout(r,ms))}={}){
  const configured=env.TRAVNR_RELAY_MODE||"CLOCK_ONLY", lane=env.TRAVNR_RELAY_LANE||"CLOCK_ONLY",
-  multi=configured==="MULTI_LANE", mode=multi?lane:configured, start=now(),runId=Number(env.GITHUB_RUN_ID);
+  multi=configured==="MULTI_LANE", shadow=configured==="SHADOW_PAIR", mode=multi||shadow?lane:configured, start=now(),runId=Number(env.GITHUB_RUN_ID);
  if(env.GITHUB_ACTIONS!=="true"||env.GITHUB_REPOSITORY!==RELAY||env.GITHUB_REF!=="refs/heads/main"||
    env.GITHUB_EVENT_NAME!=="workflow_dispatch"||env.GITHUB_RUN_ATTEMPT!=="1"||!id(runId)||!sha(env.GITHUB_SHA)||
    !["CLOCK_ONLY","PILOT","PRIMARY_BACKSTOP","ROLLING_ROOT"].includes(mode)||
-   (multi?!MULTI_LANES.includes(lane):lane!=="CLOCK_ONLY")||typeof env.GITHUB_TOKEN!=="string"||
+   (shadow?!["PRIMARY_BACKSTOP","ROLLING_ROOT"].includes(lane)||!!env.TRAVNR_TARGET_ACTIONS_TOKEN:multi?!MULTI_LANES.includes(lane):lane!=="CLOCK_ONLY")||typeof env.GITHUB_TOKEN!=="string"||
    env.GITHUB_TOKEN.length<16||env.NODE_TLS_REJECT_UNAUTHORIZED==="0"||
    ["DATABASE_URL","AERODATABOX_API_KEY","RAPIDAPI_KEY","V39_DATABASE_RUNTIME_URL","AERODATABOX_WEBHOOK_SECRET"].some(k=>env[k]))HOLD("SCOPE");
  let reads=0,attempted=false;
@@ -126,11 +126,12 @@ export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep
  try{
   const self=exact(await get(RELAY,"/actions/runs/"+runId),SELF,RELAY);
   if(self.id!==runId||self.head_sha!==env.GITHUB_SHA||self.event!=="workflow_dispatch"||self.status!=="in_progress"||
-     multi&&self.display_title!==laneTitle(lane))HOLD("SELF_IDENTITY");
+     (multi||shadow)&&self.display_title!==laneTitle(lane))HOLD("SELF_IDENTITY");
   const elapsed=now()-Date.parse(self.created_at);
   if(elapsed<0||elapsed>24*3600000)HOLD("SELF_CLOCK");
   const clock={relayRunId:runId,mode,actualCreatedUtc:self.created_at,runnerObservedUtc:iso(now()),creationToObservedMs:elapsed};
   if(mode==="CLOCK_ONLY")return result("EXTERNAL_CLOCK_OBSERVED_NO_TARGET_DISPATCH",clock);
+  if(shadow)return result("EXTERNAL_RECOVERY_LANE_SHADOW_OBSERVED_NO_TARGET_DISPATCH",{...clock,relayDispatches:0});
   const lanePrefix=mode==="PRIMARY_BACKSTOP"?"TRAVNR_RELAY_PRIMARY":"TRAVNR_RELAY_ROLLING";
   if(multi&&env[lanePrefix+"_ENABLED"]!=="1")return result("DEFER_SEPARATE_LANE_OFF",clock);
   if(multi&&env.TRAVNR_TARGET_FORWARD_ENV_READY!=="1")HOLD("TARGET_FORWARD_ENV_NOT_COMMISSIONED");
