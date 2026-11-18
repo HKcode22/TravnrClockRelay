@@ -3,6 +3,7 @@
  * to cron service as destination auth. No production token or database here.
  * No automatic create/enable/rekey/replay. */
 import {resolve} from "node:path";
+import {execFileSync} from "node:child_process";
 import {fileURLToPath} from "node:url";
 import {PILOT,REPO,WF,validateJob} from "./cron-audit.mjs";
 const URL="https://api.github.com/repos/"+REPO+"/actions/workflows/"+WF+"/dispatches",ROOT="https://api.cron-job.org";
@@ -18,10 +19,11 @@ export const LANES=Object.freeze({
 });
 const eq=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 const fixedHeaders=token=>({Authorization:"Bearer "+token,Accept:"application/vnd.github+json","Content-Type":"application/json","X-GitHub-Api-Version":"2022-11-28"});
-export function managedSpec({lane,until,token,now}){
- if(!Object.hasOwn(LANES,lane)||!tokenOK(token)||!Number.isSafeInteger(now))HOLD("SCOPE");
+export function managedSpec({lane,until,token,now,forDisable=false}){
+ if(!Object.hasOwn(LANES,lane)||(!forDisable&&!tokenOK(token))||!Number.isSafeInteger(now)||typeof forDisable!=="boolean")HOLD("SCOPE");
  const end=time(until);
- if(end<now+30*60000||end>now+32*86400000)HOLD("EXPIRY_BOUND");
+ if(!forDisable&&(end<now+30*60000||end>now+32*86400000))HOLD("EXPIRY_BOUND");
+ if(forDisable)token="github_pat_"+"x".repeat(40);
  const l=LANES[lane];
  return {title:l.title,url:URL,enabled:false,saveResponses:true,requestMethod:1,type:0,requestTimeout:30,redirectSuccess:false,
   auth:{enable:false},
@@ -53,7 +55,7 @@ export async function manage({op,lane,until,token,now,jobId,confirm,pin,env},{re
  const rules={CREATE_DISABLED:"CREATE_EXACT_DISABLED_MANAGED_CRON_JOB",ENABLE_EXACT:"ENABLE_EXACT_MANAGED_CRON_JOB",DISABLE_EXACT:"DISABLE_EXACT_MANAGED_CRON_JOB"};
  if(!Object.hasOwn(rules,op)||confirm!==rules[op]||!sha(pin)||typeof request!=="function"||typeof main!=="function"||
     (op==="CREATE_DISABLED"?jobId!==null:!id(jobId)))HOLD("EXPLICIT_APPROVAL");
- const s=managedSpec({lane,until,token,now});
+ const s=managedSpec({lane,until,token,now,forDisable:op==="DISABLE_EXACT"});
  const stable=async()=>{if(await main()!==pin)HOLD("RELAY_MAIN_DRIFT")};
  await stable();
  if(op==="ENABLE_EXACT"&&lane!=="CLOCK_ONLY"){
@@ -61,7 +63,7 @@ export async function manage({op,lane,until,token,now,jobId,confirm,pin,env},{re
   if(env?.TRAVNR_RELAY_MODE!=="MULTI_LANE"||env[k]!=="1"||!sha(env.TRAVNR_APPROVED_TARGET_MAIN_SHA??"")||
      env.TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED!=="1")HOLD("SEPARATE_TARGET_LANE_APPROVAL_REQUIRED");
  }
- listMatch(await request("GET","/jobs"),s,jobId,now);
+ if(op!=="DISABLE_EXACT")listMatch(await request("GET","/jobs"),s,jobId,now);
  if(op==="CREATE_DISABLED"){
   await stable();emit({status:"CRON_CREATE_DISABLED_ATTEMPT_NO_REPLAY",lane,relayPin:pin});
   const a=await request("PUT","/jobs",{job:s});
@@ -73,14 +75,14 @@ export async function manage({op,lane,until,token,now,jobId,confirm,pin,env},{re
  }
  const prior=(await request("GET","/jobs/"+jobId)).jobDetails,want=op==="ENABLE_EXACT";
  if(typeof prior?.enabled!=="boolean")HOLD("EXISTING_JOB_STATE");
- exactManaged(prior,s,jobId,prior.enabled);
+ exactManaged(prior,s,jobId,prior.enabled,{requireToken:op!=="DISABLE_EXACT"});
  if(prior.enabled===want)return {status:want?"ALREADY_ENABLED_READBACK_NO_WRITE":"ALREADY_DISABLED_READBACK_NO_WRITE",lane,jobId,until,relayPin:pin,cronMutations:0,...zero};
  await stable();
  const attemptUtc=iso(Date.now());
  emit({status:want?"CRON_ENABLE_ATTEMPT_NO_REPLAY":"CRON_DISABLE_ATTEMPT_NO_REPLAY",lane,jobId,attemptUtc});
  await request("PATCH","/jobs/"+jobId,{job:{enabled:want}});
  const after=(await request("GET","/jobs/"+jobId)).jobDetails;
- exactManaged(after,s,jobId,want);
+ exactManaged(after,s,jobId,want,{requireToken:op!=="DISABLE_EXACT"});
  await stable();
  return {status:want?"MANAGED_CRON_ENABLED_VERIFIED_NOT_EXECUTION_PROOF":"MANAGED_CRON_DISABLED_VERIFIED",lane,jobId,until,relayPin:pin,attemptUtc,readbackUtc:iso(Date.now()),cronMutations:1,...zero};
 }
@@ -120,6 +122,7 @@ async function main(){
  if(e.DATABASE_URL||e.RAPIDAPI_KEY||e.AERODATABOX_API_KEY||e.TRAVNR_TARGET_ACTIONS_TOKEN||e.NODE_TLS_REJECT_UNAUTHORIZED==="0")HOLD("FORBIDDEN_CREDENTIAL_SCOPE");
  const request=requestWith(e.TRAVNR_CRON_ACCOUNT_KEY),token=e.TRAVNR_CRON_RELAY_TOKEN,emit=x=>console.log(JSON.stringify(x));
  const main=async()=>{
+  if(local){try{return JSON.parse(execFileSync("gh",["api","--hostname","github.com","--method","GET","repos/"+REPO+"/git/ref/heads/main"],{env:{PATH:e.PATH,HOME:e.HOME,GH_PROMPT_DISABLED:"1",...(e.GH_CONFIG_DIR?{GH_CONFIG_DIR:e.GH_CONFIG_DIR}:{}),...(e.GH_TOKEN?{GH_TOKEN:e.GH_TOKEN}:{})},encoding:"utf8",timeout:15000,maxBuffer:32768,stdio:["ignore","pipe","ignore"]})).object?.sha}catch{HOLD("LOCAL_GITHUB_READ")}}
   const auth=e.GITHUB_TOKEN;
   const r=await fetch("https://api.github.com/repos/"+REPO+"/git/ref/heads/main",{method:"GET",headers:{Accept:"application/vnd.github+json",...(auth?{Authorization:"Bearer "+auth}:{})},redirect:"error",signal:AbortSignal.timeout(10000)});
   if(!r.ok)HOLD("RELAY_MAIN_READ");return (await r.json()).object?.sha;
