@@ -152,3 +152,25 @@ test("routine lease audit advances only fixed existing pair and exact approved e
  assert.equal(continuityConfig(c,j,"SHADOW_RECENT",t).until,"2026-12-27T08:00:00.000Z");
  for(const [cfg,job,mode,now] of [[{...c,leaseContinuity:false},j,"RECENT",t],[{...c,jobId:1},j,"RECENT",t],[c,j,"SHADOW",t],[c,j,"RECENT",t-1],[c,{schedule:{expiresAt:20261228080000}},"RECENT",t]])assert.equal(continuityConfig(cfg,job,mode,now).until,c.until);
 });
+
+test("direct target audit distinguishes a reconciled wave from green preflight HOLD",async()=>{
+ const pin="b".repeat(40),n=777,q={lane:"ROLLING_ROOT",targetPin:pin,directTick:true};
+ const row={id:n,head_sha:pin,head_branch:"main",event:"workflow_dispatch",display_title:"P6 DIRECT RECOVERY TICK",
+  path:".github/workflows/phase6-direct-recovery-tick.yml",run_attempt:1,status:"completed",conclusion:"success"};
+ const mk=(name,conclusion="success")=>({name,conclusion,status:"completed"});
+ const j={id:888,name:"direct-protected-recovery-tick",run_id:n,head_sha:pin,run_attempt:1,status:"completed",conclusion:"success",
+  steps:[mk("Execute one direct recovery wave and reconcile exact parent ACKs"),mk("Preserve direct terminal operational receipt"),mk("Direct outcome TERMINAL_PARENT_ACKS_RECONCILED"),mk("Direct outcome PREFLIGHT_HOLD_NO_POST","skipped")]};
+ const skip={...j,id:889,name:"offline-direct-recovery",conclusion:"skipped",steps:[]};
+ const get=job=>async path=>path.includes("/jobs")?{total_count:2,jobs:[job,skip]}:row;
+ assert.equal((await observeTargetStep(q,n,get(j))).status,"RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF");
+ const hold={...j,steps:[...j.steps.slice(0,2),mk("Direct outcome TERMINAL_PARENT_ACKS_RECONCILED","skipped"),mk("Direct outcome PREFLIGHT_HOLD_NO_POST")]};
+ assert.equal((await observeTargetStep(q,n,get(hold))).status,"RELAY_TARGET_DIRECT_PREFLIGHT_HOLD_NO_POST");
+ await assert.rejects(observeTargetStep(q,n,get({...j,steps:j.steps.slice(0,3)})),/DIRECT_TARGET_DISPOSITION/);
+ await assert.rejects(observeTargetStep({...q,directTick:false},n,get(j)),/TARGET_RUN_IDENTITY/);
+});
+test("only explicitly selected direct audit route accepts direct target workflow ACK",()=>{
+ const x=mk(),q={...c,lane:"ROLLING_ROOT",directTick:true},run={...x.run,display_title:"TRAVNR EXTERNAL CLOCK ROLLING_ROOT"},job={...x.jobs.jobs[0],name:"target-forward"},jobs={total_count:1,jobs:[job]};
+ const receipt={...x.receipt,mode:q.lane,status:"TARGET_ACK_AND_RUN_IDENTITY_VERIFIED_NOT_COLLECTION_PROOF",targetRunId:555,targetWorkflow:"phase6-direct-recovery-tick.yml",relayDispatches:1};
+ assert.equal(verifyReceipt(q,x.r,101,run,jobs,JSON.stringify(receipt)).status,"RELAY_TARGET_ACK_ONLY");
+ assert.throws(()=>verifyReceipt({...q,directTick:false},x.r,101,run,jobs,JSON.stringify(receipt)),/RECOVERY_TARGET_ACK/);
+});
