@@ -56,7 +56,7 @@ export function classify(c,slots,history){
   if(x.jobId!==c.jobId||!Number.isSafeInteger(x.datePlanned)||!Number.isSafeInteger(x.date)||!Number.isSafeInteger(x.jitter)||
      typeof x.identifier!=="string"||!/^[A-Za-z0-9-]{1,100}$/.test(x.identifier)||x.url!==URL||
      Math.abs((x.date-x.datePlanned)*1000-x.jitter)>2000)HOLD("HISTORY_IDENTITY");
-  if(x.datePlanned*1000<time(c.from)||x.datePlanned*1000>=time(c.until)||!meta(c).minutes.includes(new Date(x.datePlanned*1000).getUTCMinutes()))unexpected.push(x.datePlanned);
+  if(x.datePlanned*1000<time(c.originalFrom??c.from)||x.datePlanned*1000>=time(c.until)||!meta(c).minutes.includes(new Date(x.datePlanned*1000).getUTCMinutes()))unexpected.push(x.datePlanned);
   if(!groups.has(x.datePlanned))groups.set(x.datePlanned,[]);
   groups.get(x.datePlanned).push(x);
  }
@@ -232,8 +232,23 @@ export function shadowConfigs(raw,pin){
   return {lane,jobId,pin,title:MANAGED_LANES[lane].title,from:j.attemptUtc,enabledReadback:j.readbackUtc,until:x.until,shadow:true};
  });
 }
+/** The original failed sample remains immutable. New proof starts only
+ * after each actual credential PATCH and exact readback. */
+export function repairedShadowConfigs(raw,pin){
+ let x;try{x=JSON.parse(raw)}catch{HOLD("REPAIR_RECEIPT_JSON")}
+ if(typeof raw!=="string"||raw.length>4000||!sha(pin)||x?.relayPin!==pin||x.status!=="EXACT_EXISTING_PAIR_AUTH_REPAIRED_NO_FORWARD"||
+    x.until!=="2026-12-19T08:00:00.000Z"||!id(x.probeRunId)||!id(x.probeJobId)||x.cronMutations!==2||
+    x.providerCalls!==0||x.databaseWrites!==0||x.targetDispatches!==0||x.paidAuthorityGranted!==false||
+    !Array.isArray(x.jobs)||x.jobs.length!==2)HOLD("REPAIR_RECEIPT_SCOPE");
+ return [["PRIMARY_BACKSTOP",8890475,"2026-11-18T10:05:06.006Z"],["ROLLING_ROOT",8890476,"2026-11-18T10:05:07.058Z"]].map(([lane,jobId,originalFrom],i)=>{
+  const j=x.jobs[i],a=time(j?.attemptUtc),z=time(j?.readbackUtc);
+  if(j.lane!==lane||j.jobId!==jobId||a<Date.parse("2026-11-18T11:07:38.180Z")||z<a||z-a>60000||z>=time(x.until))HOLD("REPAIR_BOUNDARY");
+  // Do not count a tick racing with the replacement PATCH as new proof.
+  return {lane,jobId,pin,title:MANAGED_LANES[lane].title,originalFrom,from:j.readbackUtc,enabledReadback:j.readbackUtc,until:x.until,shadow:true};
+ });
+}
 async function main(){
- const e=process.env,local=process.argv[2]==="--owner-audit-pilot",shadow=process.argv[2]==="--shadow-pair",mode=local?"PILOT":shadow?"SHADOW":e.TRAVNR_CRON_AUDIT_MODE;
+ const e=process.env,local=process.argv[2]==="--owner-audit-pilot",repaired=process.argv[2]==="--shadow-rekey",shadow=process.argv[2]==="--shadow-pair"||repaired,mode=local?"PILOT":shadow?"SHADOW":e.TRAVNR_CRON_AUDIT_MODE;
  if(local?e.GITHUB_ACTIONS==="true":e.GITHUB_ACTIONS!=="true"||e.GITHUB_REPOSITORY!==REPO||e.GITHUB_REF!=="refs/heads/main"||
     !(shadow?["workflow_dispatch"]:["schedule","push"]).includes(e.GITHUB_EVENT_NAME)||e.GITHUB_RUN_ATTEMPT!=="1"||
     (!shadow&&(e.GITHUB_EVENT_NAME==="schedule"?mode!=="RECENT":mode!=="PILOT"||e.TRAVNR_CRON_PREVIOUS_RELAY_SHA!==PILOT.pin||Date.now()<time(PILOT.until)+120000))||
@@ -242,7 +257,7 @@ async function main(){
     typeof e.TRAVNR_CRON_ACCOUNT_KEY!=="string"||e.TRAVNR_CRON_ACCOUNT_KEY.length<16)HOLD("SECRET_SCOPE");
  const layout=shadow?"SHADOW_PAIR":mode==="PILOT"?"CLOCK_ONLY":e.TRAVNR_CRON_AUDIT_LAYOUT||"CLOCK_ONLY";
  if(!["CLOCK_ONLY","RECOVERY_PAIR","SHADOW_PAIR"].includes(layout))HOLD("AUDIT_LAYOUT");
- const configs=shadow?shadowConfigs(e.TRAVNR_SHADOW_RECEIPT,e.GITHUB_SHA):(layout==="RECOVERY_PAIR"?["PRIMARY_BACKSTOP","ROLLING_ROOT"]:["CLOCK_ONLY"]).map(l=>({...config(e,mode,l),...(layout==="RECOVERY_PAIR"?{targetPin:e.TRAVNR_APPROVED_TARGET_MAIN_SHA}:{})}));
+ const configs=repaired?repairedShadowConfigs(e.TRAVNR_SHADOW_RECEIPT,e.GITHUB_SHA):shadow?shadowConfigs(e.TRAVNR_SHADOW_RECEIPT,e.GITHUB_SHA):(layout==="RECOVERY_PAIR"?["PRIMARY_BACKSTOP","ROLLING_ROOT"]:["CLOCK_ONLY"]).map(l=>({...config(e,mode,l),...(layout==="RECOVERY_PAIR"?{targetPin:e.TRAVNR_APPROVED_TARGET_MAIN_SHA}:{})}));
  if(layout==="RECOVERY_PAIR"&&!configs.every(c=>sha(c.targetPin)))HOLD("TARGET_AUDIT_PIN_REQUIRED");
  if(new Set(configs.map(x=>x.jobId)).size!==configs.length)HOLD("DUPLICATE_AUDIT_JOB");
  const allowed=new Set(configs.map(x=>String(x.jobId))),max=mode==="PILOT"||shadow?15:layout==="RECOVERY_PAIR"?6:5;
@@ -270,6 +285,16 @@ async function main(){
   const a=await fetch(TARGET_PUBLIC+p,{method:"GET",headers:{Accept:"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"},redirect:"error",signal:AbortSignal.timeout(10000)});
   if(!a.ok)HOLD("PUBLIC_TARGET_HTTP_"+a.status);return a.json();
  };
+ if(repaired){
+  let r;try{r=JSON.parse(e.TRAVNR_SHADOW_RECEIPT)}catch{HOLD("REPAIR_RECEIPT_JSON")}
+  const p=await gh("/actions/runs/"+r.probeRunId),j=await gh("/actions/runs/"+r.probeRunId+"/jobs?filter=latest&per_page=100");
+  const v=j.jobs?.find(x=>x.id===r.probeJobId);
+  if(p.id!==r.probeRunId||p.head_sha!==e.GITHUB_SHA||p.head_branch!=="main"||p.event!=="workflow_dispatch"||
+    p.run_attempt!==1||p.path!==".github/workflows/"+WF||p.display_title!=="TRAVNR EXTERNAL CLOCK CLOCK_ONLY"||p.status!=="completed"||p.conclusion!=="success"||
+    j.total_count!==3||j.jobs?.length!==3||!j.jobs.every(x=>x.run_id===p.id&&x.head_sha===e.GITHUB_SHA&&x.run_attempt===1&&x.status==="completed")||
+    v?.name!=="independent-pulse"||v.conclusion!=="success"||v.steps?.filter(s=>s.name==="Run node cli.mjs"&&s.status==="completed"&&s.conclusion==="success").length!==1||
+    !["offline-tests","target-forward"].every(k=>j.jobs.some(x=>x.name===k&&x.conclusion==="skipped"&&(x.steps==null||x.steps.length===0))))HOLD("REPAIR_PROBE_EXECUTION");
+ }
  if(shadow){
   const end=Math.max(...configs.map(c=>time(c.enabledReadback)))+60*60000;
   const left=end-Date.now();if(left>60*60000||left< -5*60000)HOLD("SHADOW_AUDIT_CLOCK");
