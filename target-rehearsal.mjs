@@ -84,8 +84,10 @@ export async function rehearse(env,{fetcher=fetch,readLog=(f,t,j)=>readPrimaryVe
   if(!id(j?.id))HOLD("OBSERVE_JOB");
   const log=await readLog(fetcher,token,j.id);
   const proof=verifyObserveReceipt(row,jobs,log,tid);
+  const done=Date.parse(j.completed_at),created=Date.parse(row.created_at),observed=now();
+  if(![done,created,observed].every(Number.isFinite)||created<sent-5000||done<created||done<sent||done>observed+5000)HOLD("TARGET_COMPLETION_CLOCK");
   await stable();
-  return {status:"ACTUAL_CROSS_REPO_OBSERVE_DELIVERY_VERIFIED_NOT_COLLECTION_PROOF",relayRunId:n,relayPin:pin,...proof,requestToTargetCompletionMs:Date.parse(j.completed_at)-sent,providerCallsByRelay:0,databaseReadsByRelay:0,databaseWritesByRelay:0,paidAuthorityGranted:false,dispatches:1};
+  return {status:"ACTUAL_CROSS_REPO_OBSERVE_DELIVERY_VERIFIED_NOT_COLLECTION_PROOF",relayRunId:n,relayPin:pin,...proof,requestToTargetCompletionMs:done-sent,providerCallsByRelay:0,databaseReadsByRelay:0,databaseWritesByRelay:0,paidAuthorityGranted:false,dispatches:1};
  }catch(e){
   const m=/^HOLD_(CROSS_REPO_REHEARSAL|EXTERNAL_CLOCK)_[A-Z0-9_]+$/.test(e?.message??"")?e.message:"HOLD_CROSS_REPO_REHEARSAL_REDACTED";
   throw Error(attempted?m+"_NO_BLIND_REPLAY":m);
