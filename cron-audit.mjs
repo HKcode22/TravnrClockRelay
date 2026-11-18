@@ -23,7 +23,7 @@ export function config(env,mode,lane="CLOCK_ONLY"){
  const c={lane,jobId:Number(env[pre+"JOB_ID"]),title:MANAGED_LANES[lane].title,pin:env.TRAVNR_CRON_RELAY_SHA,from:env[pre+"START_UTC"],enabledReadback:env[pre+"ENABLED_UTC"],until:env[pre+"UNTIL_UTC"]};
  if(!/^[1-9]\d{0,14}$/.test(env[pre+"JOB_ID"]??"")||!sha(c.pin)||!id(c.jobId))HOLD("CONFIG");
  const a=time(c.from),b=time(c.enabledReadback),z=time(c.until);
- if(b<a||b-a>60000||z<=b||z-a>32*86400000)HOLD("CONFIG_WINDOW");
+ if(b<a||b-a>60000||z<=b||z-a>60*86400000)HOLD("CONFIG_WINDOW");
  return c;
 }
 export function validateJob(c,j){
@@ -167,6 +167,14 @@ export function samples(rows,mode,limit=3){
  const max=[...good].sort((a,b)=>b.row.jitter-a.row.jitter||a.planned-b.planned)[0];
  return [...new Map([good[0],good.at(-1),max].filter(Boolean).map(x=>[x.planned,x])).values()];
 }
+/** Read-only expiry warning; never extends an authorization. */
+export function leaseHealth(c,mode,now){
+ if(mode==="PILOT")return null;
+ const end=time(c.until);
+ if(!Number.isSafeInteger(now))HOLD("CLOCK");
+ const remaining=end-now;
+ return {remainingMs:Math.max(0,remaining),state:remaining<=0?"EXPIRED":remaining<=48*3600000?"RENEWAL_CRITICAL":remaining<=7*86400000?"RENEWAL_DUE_REVIEW":"LEASE_CURRENT"};
+}
 export async function audit({c,mode,now,cron,gh,logs,targetGh,sampleLimit=3}){
  const detail=validateJob(c,(await cron("/jobs/"+c.jobId)).jobDetails);
  const slots=planned(c,mode,now),h=await cron("/jobs/"+c.jobId+"/history"),{rows,unexpected}=classify(c,slots,h.history);
@@ -193,6 +201,7 @@ export async function audit({c,mode,now,cron,gh,logs,targetGh,sampleLimit=3}){
  const bad=safe.filter(x=>!["CLOCK_ONLY_PROVEN","CRON_HTTP_ACK_ONLY","RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF","RELAY_OBSERVED_DEFER_NO_WORK_PROOF"].includes(x.status));
  const expired=now>=time(c.until)+120000,disabledEarly=now<time(c.until)&&!detail.enabled;
  return {status:"READONLY_CRON_AND_RELAY_AUDIT_NOT_COLLECTION_PROOF",mode,lane:laneOf(c),jobId:c.jobId,relayPin:c.pin,observedUtc:iso(now),auditFirstPlannedUtc:slots.length?iso(slots[0]*1000):null,auditLastPlannedUtc:slots.length?iso(slots.at(-1)*1000):null,expected:slots.length,proven:proven.length,ackOnly:ackOnly.length,relayTargetAcks,relayTargetExecutions,relayDefers,unresolved:bad.length,unexpectedRows:unexpected,over120Seconds:late.length,expired,disabledEarly,
+  leaseHealth:leaseHealth(c,mode,now),
   fullyProven:expired&&mode==="PILOT"&&slots.length>0&&proven.length===slots.length&&unexpected===0,
   timingTargetMet:expired&&mode==="PILOT"&&slots.length>0&&proven.length===slots.length&&unexpected===0&&late.length===0,
   maxPlannedToRunnerMs:timed.length?Math.max(...timed.map(x=>x.plannedToRunnerMs)):null,rows:safe,
@@ -242,7 +251,7 @@ async function main(){
   try{
    const out=await audit({c,mode,now:Date.now(),cron,gh,logs,targetGh:layout==="RECOVERY_PAIR"?targetGh:undefined,sampleLimit:layout==="RECOVERY_PAIR"?1:3});
    console.log(JSON.stringify({...out,cronApiReads:calls-before}));
-   if(out.unresolved||out.unexpectedRows||out.disabledEarly||out.over120Seconds||(out.expired&&(mode==="RECENT"||!out.fullyProven)))process.exitCode=2;
+   if(out.unresolved||out.unexpectedRows||out.disabledEarly||out.over120Seconds||out.leaseHealth?.state==="RENEWAL_CRITICAL"||out.leaseHealth?.state==="EXPIRED"||(out.expired&&(mode==="RECENT"||!out.fullyProven)))process.exitCode=2;
   }catch(err){console.error(JSON.stringify({status:"AUDIT_LANE_UNVERIFIED",lane:laneOf(c),jobId:c.jobId,reason:/^HOLD_CRON_MANAGER_[A-Z0-9_]+$/.test(err?.message??"")?err.message:"HOLD_CRON_MANAGER_REDACTED",cronApiReads:calls-before}));process.exitCode=2;}
  }
 }
