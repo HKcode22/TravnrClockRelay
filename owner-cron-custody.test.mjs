@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {setupCustody} from "./owner-cron-custody.mjs";
+import {setupCustody,ownerGhEnv,ghFailure} from "./owner-cron-custody.mjs";
 const pin="9cca29330405774520e0c7929f4916e24d9934e4",key="account-fixture-"+"k".repeat(32),token="github_pat_"+"x".repeat(40);
 const A="travnr-cron-audit",M="travnr-cron-management",K="TRAVNR_CRON_ACCOUNT_KEY",P="TRAVNR_CRON_RELAY_TOKEN";
 function fixture(fault=""){
@@ -45,4 +45,15 @@ test("existing exact environments can safely rotate stored values without reconf
  const f=fixture();await setupCustody({key,token},f);const n=f.calls.length;await setupCustody({key,token},f);
  assert.equal(f.calls.slice(n).filter(c=>["PUT","POST"].includes(c.method)).length,0);
  assert.equal(f.calls.slice(n).filter(c=>c.method==="SECRET").length,3);
+});
+
+test("owner gh retains nondefault CLI authentication lookup and excludes unrelated credentials",()=>{
+ const e=ownerGhEnv({PATH:"/bin",HOME:"/home/runner",XDG_CONFIG_HOME:"/home/runner/workspace/.config",GH_CONFIG_DIR:"/home/runner/workspace/.config/gh",GITHUB_TOKEN:"owner-fixture",TRAVNR_CRON_ACCOUNT_KEY:"not-inherited",TRAVNR_CRON_RELAY_TOKEN:"not-inherited",DATABASE_URL:"not-inherited"});
+ assert.equal(e.XDG_CONFIG_HOME,"/home/runner/workspace/.config");assert.equal(e.GH_CONFIG_DIR,"/home/runner/workspace/.config/gh");assert.equal(e.GITHUB_TOKEN,"owner-fixture");assert.equal(e.TRAVNR_CRON_ACCOUNT_KEY,undefined);assert.equal(e.TRAVNR_CRON_RELAY_TOKEN,undefined);assert.equal(e.DATABASE_URL,undefined);
+});
+test("failure output uses only fixed reason codes, never raw stderr",()=>{
+ assert.equal(ghFailure({stderr:"gh: Bad credentials (HTTP 401) sensitive-fixture"}),"HTTP_401");
+ assert.equal(ghFailure({stderr:"To get started with GitHub CLI, please run: gh auth login"}),"AUTH_REQUIRED");
+ assert.equal(ghFailure({stderr:"arbitrary private secret text"}),"UNVERIFIED");
+ assert.equal(ghFailure({code:"ETIMEDOUT"}),"TIMEOUT");
 });
