@@ -1,0 +1,61 @@
+name: Post-repair actual external shadow pair audit (read-only)
+on:
+  pull_request:
+    branches: [main]
+    paths: ['owner-cron-pair-repair.mjs','owner-cron-pair-repair.test.mjs','cron-audit.mjs','cron-audit.test.mjs','.github/workflows/cron-repair-audit.yml']
+  workflow_dispatch:
+    inputs:
+      approved_relay_sha:
+        type: string
+        required: true
+      repair_receipt:
+        type: string
+        required: true
+      confirm:
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: cron-repair-audit-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'one-shot' }}
+  cancel-in-progress: false
+jobs:
+  offline:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - run: node --check owner-cron-pair-repair.mjs && node --test owner-cron-pair-repair.test.mjs cron-audit.test.mjs
+  actual-post-repair:
+    if: >-
+      github.repository == 'HKcode22/TravnrClockRelay' &&
+      github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' &&
+      github.run_attempt == 1 && inputs.approved_relay_sha == github.sha &&
+      inputs.confirm == 'VERIFY_REKEYED_SHADOW_PAIR_READONLY_NO_FORWARD' &&
+      vars.TRAVNR_RELAY_MODE == 'CLOCK_ONLY' &&
+      vars.TRAVNR_RELAY_PRIMARY_ENABLED != '1' && vars.TRAVNR_RELAY_ROLLING_ENABLED != '1' &&
+      vars.TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED != '1'
+    environment: travnr-cron-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - name: Independently observe first hour after exact credential readback
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TRAVNR_CRON_ACCOUNT_KEY: ${{ secrets.TRAVNR_CRON_ACCOUNT_KEY }}
+          TRAVNR_SHADOW_RECEIPT: ${{ inputs.repair_receipt }}
+          TRAVNR_TARGET_ACTIONS_TOKEN: ''
+          TRAVNR_CRON_RELAY_TOKEN: ''
+          DATABASE_URL: ''
+          AERODATABOX_API_KEY: ''
+          RAPIDAPI_KEY: ''
+        run: node cron-audit.mjs --shadow-rekey
