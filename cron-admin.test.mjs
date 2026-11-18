@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {managedSpec,exactManaged,manage,createDisabledPair,rekeyPilot,LANES} from "./cron-admin.mjs";
+import {managedSpec,exactManaged,manage,createDisabledPair,renewExactLease,rekeyPilot,LANES} from "./cron-admin.mjs";
 import {PILOT} from "./cron-audit.mjs";
 const pin="a".repeat(40),now=Date.parse("2026-11-18T08:00:00Z"),until="2026-11-20T08:00:00.000Z",tok="github_pat_"+"t".repeat(40),newTok="github_pat_"+"n".repeat(40);
 const ops={CREATE_DISABLED:"CREATE_EXACT_DISABLED_MANAGED_CRON_JOB",ENABLE_EXACT:"ENABLE_EXACT_MANAGED_CRON_JOB",DISABLE_EXACT:"DISABLE_EXACT_MANAGED_CRON_JOB"};
@@ -94,3 +94,27 @@ test("duplicate IDs and forwarding-on config reject pair completion",async()=>{
  const g=pairFixture();g.pair.env.TRAVNR_RELAY_ROLLING_ENABLED="1";
  await assert.rejects(createDisabledPair(g.pair,g),/PAIR_STOP_SCOPE/);assert.equal(g.calls.length,0);
 });
+
+function renewalFixture(fault=""){
+ const lane="ROLLING_ROOT",priorUntil="2026-11-20T08:00:00.000Z",nextUntil="2026-11-29T08:00:00.000Z";
+ const args={lane,priorUntil,until:nextUntil,token:tok,now,jobId:42,confirm:"RENEW_ACTIVE_MANAGED_CRON_LEASE_ONLY",pin};
+ const old=managedSpec({lane,until:priorUntil,token:tok,now}),newer=managedSpec({lane,until:nextUntil,token:tok,now});
+ let job={jobId:42,...(fault==="already"?newer:old),enabled:fault!=="disabled"};
+ if(fault==="otherExpiry")job.schedule={...job.schedule,expiresAt:20261121080000};
+ if(fault==="tokenDrift")job.extendedData={...job.extendedData,headers:{...job.extendedData.headers,Authorization:"Bearer "+newTok}};
+ const calls=[],events=[];
+ return {args,calls,events,main:async()=>pin,emit:x=>events.push(x),request:async(method,path,body)=>{
+  calls.push(method);
+  if(path==="/jobs")return {someFailed:false,jobs:[{jobId:42,title:job.title,url:job.url}]};
+  assert.equal(path,"/jobs/42");
+  if(method==="PATCH"){assert.deepEqual(body,{job:{schedule:newer.schedule}});if(fault==="unknown")throw Error("unknown timeout");job={...job,...body.job};return {};}
+  return {jobDetails:job};
+ }};
+}
+test("exact active lease renewal patches schedule only and verifies original job/token",async()=>{
+ const f=renewalFixture(),r=await renewExactLease(f.args,f);assert.equal(r.status,"MANAGED_CRON_LEASE_RENEWED_VERIFIED_NOT_EXECUTION_PROOF");assert.deepEqual(f.calls,["GET","GET","PATCH","GET"]);assert.equal(r.cronMutations,1);assert(!JSON.stringify([r,f.events]).includes(tok));
+});
+test("already renewed exact lease is readback-only",async()=>{const f=renewalFixture("already"),r=await renewExactLease(f.args,f);assert.equal(r.cronMutations,0);assert.deepEqual(f.calls,["GET","GET"])});
+test("disabled, different expiry or credential drift cannot renew",async()=>{for(const fault of ["disabled","otherExpiry","tokenDrift"]){const f=renewalFixture(fault);await assert.rejects(renewExactLease(f.args,f));assert.deepEqual(f.calls,["GET","GET"])}});
+test("too early, expired, overlong or non-extending renewal is refused before network",async()=>{for(const patch of [{now:now-8*86400000},{now:Date.parse(until)},{until:"2026-12-05T08:00:00.000Z"},{until}]){const f=renewalFixture();await assert.rejects(renewExactLease({...f.args,...patch},f),/RENEW_BOUNDS/);assert.equal(f.calls.length,0)}});
+test("uncertain renewal response does not repeat PATCH",async()=>{const f=renewalFixture("unknown");await assert.rejects(renewExactLease(f.args,f));assert.deepEqual(f.calls,["GET","GET","PATCH"])});
