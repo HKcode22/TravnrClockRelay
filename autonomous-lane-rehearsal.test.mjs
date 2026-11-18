@@ -4,7 +4,7 @@ import {verifyShadowAudit,verifyRollingReceipt,rehearse} from "./autonomous-lane
 import {RELAY,TARGET,PRIMARY,PILOT} from "./relay.mjs";
 const OLD="ed35a5467dda0afc75eda386ad43ee4f401b23c4",PIN="45d04392e2eecfc1220230f252d2ada8cc6137e0",SELF="a".repeat(40),NOW=Date.parse("2026-11-18T12:00:00Z"),iso=n=>new Date(n).toISOString(),ROOT="https://api.github.com/repos/";
 const ar={id:44281886719,head_sha:OLD,head_branch:"main",path:".github/workflows/cron-admin.yml",event:"workflow_dispatch",run_attempt:1,status:"completed",conclusion:"success"};
-const aj={total_count:3,jobs:[{id:134724802849,name:"audit-actual-shadow-pair",run_id:ar.id,head_sha:OLD,run_attempt:1,status:"completed",conclusion:"success",steps:[{name:"Observe one hour and verify every eligible external tick, no forwarding",status:"completed",conclusion:"success"}]},{id:1},{id:2}]};
+const aj={total_count:3,jobs:[{id:134724802849,name:"audit-actual-shadow-pair",run_id:ar.id,head_sha:OLD,run_attempt:1,status:"completed",conclusion:"success",steps:[{name:"Observe one hour and verify every eligible external tick, no forwarding",status:"completed",conclusion:"success"}]},{id:1,name:"exact-manual-management",run_id:ar.id,head_sha:OLD,run_attempt:1,status:"completed",conclusion:"success"},{id:2,name:"offline-tests",run_id:ar.id,head_sha:OLD,run_attempt:1,status:"completed",conclusion:"skipped",steps:[]}]};
 const shadow=["PRIMARY_BACKSTOP","ROLLING_ROOT"].map((lane,i)=>({status:"READONLY_CRON_AND_RELAY_AUDIT_NOT_COLLECTION_PROOF",mode:"SHADOW",lane,jobId:8890475+i,relayPin:OLD,shadowFullyProven:true,expected:i?6:4,proven:i?6:4,ackOnly:0,unresolved:0,unexpectedRows:0,over120Seconds:0,disabledEarly:false,relayTargetAcks:0,targetDispatches:0,cronWrites:0,providerCalls:0,databaseReads:0,databaseWrites:0,paidAuthorityGranted:false,rows:Array.from({length:i?6:4},(_,k)=>({status:"SHADOW_LANE_PROVEN_NO_FORWARD",runId:10+i*10+k,jobId:100+i*10+k}))}));
 const sl=()=>shadow.map(x=>JSON.stringify(x)).join("\n");
 test("actual audit identity, both lanes and no forwarding mandatory",()=>{
@@ -65,4 +65,26 @@ test("unknown response or incorrect terminal receipt never replays",async()=>{
 });
 test("wrong release flags or provider/management secret cannot enter routine exercise",async()=>{
  for(const patch of [{TRAVNR_RELAY_MODE:"MULTI_LANE"},{TRAVNR_RELAY_ROLLING_ENABLED:"1"},{TRAVNR_CRON_ACCOUNT_KEY:"x"},{DATABASE_URL:"x"},{GITHUB_RUN_ATTEMPT:"2"}]){const f=fixture();await assert.rejects(rehearse({...env,...patch},f.opts),/SCOPE/);assert.equal(f.calls.length,0);}
+});
+
+test("primary rehearsal uses real VERIFY_ONLY workflow, never APPLY",async()=>{
+ const p=fixture(),self=p.opts.fetcher;let posts=0;
+ const run={id:81,head_sha:PIN,head_branch:"main",path:".github/workflows/"+PRIMARY,event:"workflow_dispatch",run_attempt:1,status:"completed",conclusion:"success",created_at:iso(NOW)};
+ const j={id:82,name:"primary-fids-expiry",run_id:81,head_sha:PIN,run_attempt:1,status:"completed",conclusion:"success",completed_at:iso(NOW+1500),steps:[{name:"Verify exact main and execute only bounded primary FIDS expiry",status:"completed",conclusion:"success"}]};
+ const counters=Object.fromEntries(["liveOriginals","eligibleOriginals","hardDueOriginals","eligibleNextHour","hardDueNextHour","unboundLiveOriginals","markedExpiredPayloadPresent","unlinkedUnexpiredPopulation","unexpiredPopulationWithoutLiveOriginal"].map(k=>[k,0]));
+ const receipt={status:"PRIMARY_FIDS_VERIFY_ONLY_NO_WRITES",reviewedMainSha:PIN,distinctDbActorsVerified:true,privateCommissionState:"GRANTED",providerCalls:0,databaseWrites:0,objectDeletions:0,phase6PaidGo:false,backupOrPitrVerified:false,completeRetentionDeploymentVerified:false,before:{schema:"v39.phase5.primary-fids-expiry-status.v1",observedAtUtc:iso(NOW+1000),...counters,deletionStopUnresolved:false,providerCalls:0,databaseWrites:0,phase6PaidGo:false,backupOrPitrVerified:false,completeRetentionDeploymentVerified:false}};
+ const w=x=>({status:200,ok:true,json:async()=>x});
+ p.opts.fetcher=async(url,init)=>{
+  if(init.method==="POST"){
+   posts++;assert.equal(url,ROOT+TARGET+"/actions/workflows/"+PRIMARY+"/dispatches");assert.deepEqual(JSON.parse(init.body).inputs,{confirm:"VERIFY_PRIMARY_FIDS_ONLY_NO_WRITES",approved_main_sha:PIN});
+   return w({workflow_run_id:81,run_url:ROOT+TARGET+"/actions/runs/81",html_url:"https://github.com/"+TARGET+"/actions/runs/81"});
+  }
+  if(url.startsWith(ROOT+TARGET+"/contents/"))return w({sha:"fe6768a52899f05b208baa316a0686011abf46a7"});
+  if(url===ROOT+TARGET+"/actions/runs/81")return w(run);
+  if(url.includes("/actions/runs/81/jobs"))return w({total_count:1,jobs:[j]});
+  return self(url,init);
+ };
+ p.opts.targetLog=async()=>JSON.stringify(receipt);
+ const a=await rehearse({...env,TRAVNR_EXERCISE_LANE:"PRIMARY_BACKSTOP"},p.opts);
+ assert.equal(a.proof.verifiedRunId,81);assert.equal(posts,1);
 });
