@@ -136,12 +136,12 @@ function verifyRecoveryOutput(c,r,n,run,j,log){
  const result={...base,plannedToRunnerMs:observed-r.datePlanned*1000,creationToRunnerMs:observed-created};
  if(x.status==="TARGET_ACK_AND_RUN_IDENTITY_VERIFIED_NOT_COLLECTION_PROOF"){
 
-  const wf=laneOf(c)==="PRIMARY_BACKSTOP"?"phase5-primary-fids-expiry-no-provider.yml":c.directTick===true?"phase6-direct-recovery-tick.yml":"phase6-rolling-controller-bounded-session.yml";
+  const wf=laneOf(c)==="PRIMARY_BACKSTOP"?"phase5-primary-fids-expiry-no-provider.yml":(c.directTick===true||c.directVerify===true)?"phase6-direct-recovery-tick.yml":"phase6-rolling-controller-bounded-session.yml";
   if(!id(x.targetRunId)||x.targetWorkflow!==wf||x.relayDispatches!==1)HOLD("RECOVERY_TARGET_ACK");
   return {status:"RELAY_TARGET_ACK_ONLY",...result,targetRunId:x.targetRunId};
  }
- const benign=["DEFER_TARGET_ALREADY_ACTIVE","DEFER_RECENT_PRIMARY_STEP_NOT_DELETION_PROOF","DEFER_OUTSIDE_OR_LATE_POLICY_WINDOW",...(laneOf(c)==="ROLLING_ROOT"&&c.directTick===true?["DEFER_RECENT_DIRECT_TICK_NOT_COLLECTION_PROOF"]:[])];
- const review=["DEFER_SEPARATE_LANE_OFF","QUARANTINED_PRIOR_RELAY_RUN_REVIEW","DEFER_NO_CURRENT_MAIN_APPLY_BASELINE_REVIEW","DEFER_CURRENT_WINDOW_CUSTODY_REVIEW_NO_REPLAY",...(laneOf(c)==="ROLLING_ROOT"&&c.directTick===true?["DEFER_DIRECT_PRIOR_ATTEMPT_REVIEW_NO_REPLAY"]:[])];
+ const benign=["DEFER_TARGET_ALREADY_ACTIVE","DEFER_RECENT_PRIMARY_STEP_NOT_DELETION_PROOF","DEFER_OUTSIDE_OR_LATE_POLICY_WINDOW",...(laneOf(c)==="ROLLING_ROOT"&&(c.directTick===true||c.directVerify===true)?["DEFER_RECENT_DIRECT_TICK_NOT_COLLECTION_PROOF"]:[])];
+ const review=["DEFER_SEPARATE_LANE_OFF","QUARANTINED_PRIOR_RELAY_RUN_REVIEW","DEFER_NO_CURRENT_MAIN_APPLY_BASELINE_REVIEW","DEFER_CURRENT_WINDOW_CUSTODY_REVIEW_NO_REPLAY",...(laneOf(c)==="ROLLING_ROOT"&&(c.directTick===true||c.directVerify===true)?["DEFER_DIRECT_PRIOR_ATTEMPT_REVIEW_NO_REPLAY"]:[])];
  if(benign.includes(x.status))return {status:"RELAY_OBSERVED_DEFER_NO_WORK_PROOF",...result};
  if(review.includes(x.status))return {status:"RELAY_REVIEW_REQUIRED",...result};
  HOLD("RECOVERY_UNKNOWN_DISPOSITION");
@@ -149,29 +149,35 @@ function verifyRecoveryOutput(c,r,n,run,j,log){
 /** Target public metadata only: ACK is not terminal success, and even
  * a verified protected step does not establish provider or collection proof. */
 export async function observeTargetStep(c,targetRunId,targetGh){
- const lane=laneOf(c),primary=lane==="PRIMARY_BACKSTOP",direct=lane==="ROLLING_ROOT"&&c.directTick===true;
+ const lane=laneOf(c),primary=lane==="PRIMARY_BACKSTOP",verify=lane==="ROLLING_ROOT"&&c.directVerify===true,direct=lane==="ROLLING_ROOT"&&(c.directTick===true||verify);
  if(!["PRIMARY_BACKSTOP","ROLLING_ROOT"].includes(lane)||!id(targetRunId)||!sha(c.targetPin)||typeof targetGh!=="function")HOLD("TARGET_OBSERVATION_SCOPE");
 
  const workflow=primary?"phase5-primary-fids-expiry-no-provider.yml":direct?"phase6-direct-recovery-tick.yml":"phase6-rolling-controller-bounded-session.yml";
- const expectedJob=primary?"primary-fids-expiry":direct?"direct-protected-recovery-tick":"one-protected-bounded-session";
- const expectedStep=primary?"Verify exact main and execute only bounded primary FIDS expiry":direct?"Execute one direct recovery wave and reconcile exact parent ACKs":"Execute one protected rolling session and reconcile accepted workers before terminal";
+ const expectedJob=primary?"primary-fids-expiry":direct?(verify?"direct-readonly-verify":"direct-protected-recovery-tick"):"one-protected-bounded-session";
+ const expectedStep=primary?"Verify exact main and execute only bounded primary FIDS expiry":direct?(verify?"Verify exact direct wake and existing workflow metadata NO POST":"Execute one direct recovery wave and reconcile exact parent ACKs"):"Execute one protected rolling session and reconcile accepted workers before terminal";
  const r=await targetGh("/actions/runs/"+targetRunId);
  if(r?.id!==targetRunId||r.head_sha!==c.targetPin||r.head_branch!=="main"||r.event!=="workflow_dispatch"||
-    r.path!==".github/workflows/"+workflow||r.run_attempt!==1||direct&&r.display_title!=="P6 DIRECT RECOVERY TICK")HOLD("TARGET_RUN_IDENTITY");
+    r.path!==".github/workflows/"+workflow||r.run_attempt!==1||direct&&r.display_title!==(verify?"P6 DIRECT RECOVERY VERIFY":"P6 DIRECT RECOVERY TICK"))HOLD("TARGET_RUN_IDENTITY");
  if(!["completed","queued","in_progress","waiting","requested","pending"].includes(r.status))HOLD("TARGET_STATUS");
  if(r.status!=="completed")return {status:"RELAY_TARGET_PENDING_EXECUTION",targetRunId,targetStatus:r.status};
  if(r.conclusion!=="success")return {status:"RELAY_TARGET_TERMINAL_FAILURE",targetRunId,targetConclusion:r.conclusion};
  const jobs=await targetGh("/actions/runs/"+targetRunId+"/jobs?filter=latest&per_page=100");
- if(!Array.isArray(jobs?.jobs)||jobs.total_count!==jobs.jobs.length||jobs.total_count!==(primary?1:2)||
+ if(!Array.isArray(jobs?.jobs)||jobs.total_count!==jobs.jobs.length||jobs.total_count!==(primary?1:direct?3:2)||
     new Set(jobs.jobs.map(j=>j.id)).size!==jobs.jobs.length||
     !jobs.jobs.every(j=>id(j.id)&&j.run_id===targetRunId&&j.head_sha===c.targetPin&&j.run_attempt===1&&j.status==="completed"))HOLD("TARGET_JOBS");
  const matches=jobs.jobs.filter(j=>j.name===expectedJob);
  if(matches.length!==1)HOLD("TARGET_PROTECTED_JOB");
  const j=matches[0];
- if(!primary){const other=jobs.jobs.find(x=>x.name===(direct?"offline-direct-recovery":"offline-bounded-session-reconciliation"));if(other?.conclusion!=="skipped"||!(other.steps==null||Array.isArray(other.steps)&&other.steps.length===0))HOLD("TARGET_UNEXPECTED_JOB");}
+ 
+ if(!primary){
+  const expectedSkipped=direct?["offline-direct-recovery",verify?"direct-protected-recovery-tick":"direct-readonly-verify"]:["offline-bounded-session-reconciliation"];
+  if(!expectedSkipped.every(name=>jobs.jobs.filter(x=>x.name===name&&x.conclusion==="skipped"&&(x.steps==null||Array.isArray(x.steps)&&x.steps.length===0)).length===1))HOLD("TARGET_UNEXPECTED_JOB");
+ }
  if(j.conclusion==="skipped"&&(j.steps==null||Array.isArray(j.steps)&&j.steps.length===0))return {status:"RELAY_TARGET_PROTECTED_JOB_SKIPPED",targetRunId,targetJobId:j.id};
  if(j.conclusion!=="success"||j.steps?.filter(s=>s.name===expectedStep&&s.conclusion==="success"&&s.status==="completed").length!==1)HOLD("TARGET_PROTECTED_STEP");
 
+
+ if(verify)return {status:"RELAY_TARGET_READONLY_DIRECT_VERIFY_EXECUTED_NO_COLLECTION_PROOF",targetRunId,targetJobId:j.id,targetPin:c.targetPin};
  if(!primary&&j.steps?.filter(s=>s.name===(direct?"Preserve direct terminal operational receipt":"Preserve terminal operational receipt for independently reviewed continuation")&&s.conclusion==="success"&&s.status==="completed").length!==1)HOLD("TARGET_TERMINAL_RECEIPT_STEP");
  if(direct){
   const markers=["Direct outcome TERMINAL_PARENT_ACKS_RECONCILED","Direct outcome PREFLIGHT_HOLD_NO_POST"].map(name=>j.steps?.filter(s=>s.name===name)??[]);
@@ -233,8 +239,8 @@ export async function audit({c,mode,now,cron,gh,logs,targetGh,sampleLimit=3}){
  }
  const safe=rows.map(({row,...x})=>({...x,plannedUtc:iso(x.planned*1000)}));
  const proven=safe.filter(x=>x.status===(c.shadow?"SHADOW_LANE_PROVEN_NO_FORWARD":"CLOCK_ONLY_PROVEN")),timed=safe.filter(x=>Number.isFinite(x.plannedToRunnerMs)),late=timed.filter(x=>x.plannedToRunnerMs>120000),ackOnly=safe.filter(x=>x.status==="CRON_HTTP_ACK_ONLY");
- const relayTargetAcks=safe.filter(x=>id(x.targetRunId)).length,relayTargetExecutions=safe.filter(x=>x.status==="RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF").length,relayDefers=safe.filter(x=>x.status==="RELAY_OBSERVED_DEFER_NO_WORK_PROOF").length;
- const bad=safe.filter(x=>!["CLOCK_ONLY_PROVEN","SHADOW_LANE_PROVEN_NO_FORWARD","CRON_HTTP_ACK_ONLY","RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF","RELAY_OBSERVED_DEFER_NO_WORK_PROOF"].includes(x.status));
+ const relayTargetAcks=safe.filter(x=>id(x.targetRunId)).length,relayTargetExecutions=safe.filter(x=>x.status==="RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF"||x.status==="RELAY_TARGET_READONLY_DIRECT_VERIFY_EXECUTED_NO_COLLECTION_PROOF").length,relayDefers=safe.filter(x=>x.status==="RELAY_OBSERVED_DEFER_NO_WORK_PROOF").length;
+ const bad=safe.filter(x=>!["CLOCK_ONLY_PROVEN","SHADOW_LANE_PROVEN_NO_FORWARD","CRON_HTTP_ACK_ONLY","RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF","RELAY_TARGET_READONLY_DIRECT_VERIFY_EXECUTED_NO_COLLECTION_PROOF","RELAY_OBSERVED_DEFER_NO_WORK_PROOF"].includes(x.status));
  const expired=now>=time(c.until)+120000,disabledEarly=now<time(c.until)&&!detail.enabled;
  return {status:"READONLY_CRON_AND_RELAY_AUDIT_NOT_COLLECTION_PROOF",mode,lane:laneOf(c),jobId:c.jobId,relayPin:c.pin,observedUtc:iso(now),auditFirstPlannedUtc:slots.length?iso(slots[0]*1000):null,auditLastPlannedUtc:slots.length?iso(slots.at(-1)*1000):null,expected:slots.length,proven:proven.length,ackOnly:ackOnly.length,relayTargetAcks,relayTargetExecutions,relayDefers,unresolved:bad.length,unexpectedRows:unexpected,over120Seconds:late.length,expired,disabledEarly,
   leaseHealth:leaseHealth(c,mode,now),leaseUntilUtc:detail.expiresAt,
@@ -305,8 +311,8 @@ async function main(){
  const recoveryLayout=layout==="PRIMARY_ONLY"||layout==="RECOVERY_PAIR";
  
  const route=e.TRAVNR_RELAY_ROLLING_ROUTE||"DURABLE_ROOT";
- if(!["DURABLE_ROOT","DIRECT_TICK"].includes(route))HOLD("AUDIT_ROLLING_ROUTE");
- const configs=(shadowRecent?shadowRecentConfigs(e):repaired?repairedShadowConfigs(e.TRAVNR_SHADOW_RECEIPT,e.GITHUB_SHA):shadow?shadowConfigs(e.TRAVNR_SHADOW_RECEIPT,e.GITHUB_SHA):auditLanes(layout).map(l=>({...config(e,mode,l),...(recoveryLayout?{targetPin:e.TRAVNR_APPROVED_TARGET_MAIN_SHA,...(l==="ROLLING_ROOT"&&route==="DIRECT_TICK"?{directTick:true}:{})}:{})}))).map(c=>({...c,leaseContinuity:e.TRAVNR_LEASE_CONTINUITY_ARMED==="1"&&e.TRAVNR_LEASE_ENV_READY==="1"}));
+ if(!["DURABLE_ROOT","DIRECT_TICK","DIRECT_VERIFY"].includes(route))HOLD("AUDIT_ROLLING_ROUTE");
+ const configs=(shadowRecent?shadowRecentConfigs(e):repaired?repairedShadowConfigs(e.TRAVNR_SHADOW_RECEIPT,e.GITHUB_SHA):shadow?shadowConfigs(e.TRAVNR_SHADOW_RECEIPT,e.GITHUB_SHA):auditLanes(layout).map(l=>({...config(e,mode,l),...(recoveryLayout?{targetPin:e.TRAVNR_APPROVED_TARGET_MAIN_SHA,...(l==="ROLLING_ROOT"&&route==="DIRECT_TICK"?{directTick:true}:l==="ROLLING_ROOT"&&route==="DIRECT_VERIFY"?{directVerify:true}:{})}:{})}))).map(c=>({...c,leaseContinuity:e.TRAVNR_LEASE_CONTINUITY_ARMED==="1"&&e.TRAVNR_LEASE_ENV_READY==="1"}));
  if(recoveryLayout&&!configs.every(c=>sha(c.targetPin)))HOLD("TARGET_AUDIT_PIN_REQUIRED");
  if(new Set(configs.map(x=>x.jobId)).size!==configs.length)HOLD("DUPLICATE_AUDIT_JOB");
  const allowed=new Set(configs.map(x=>String(x.jobId))),max=mode==="PILOT"||shadow?15:["RECOVERY_PAIR","SHADOW_PAIR"].includes(layout)?6:5;

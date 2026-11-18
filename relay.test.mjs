@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {runPulse,rootInputs,cronJobSpec,readPrimaryVerifyLog,verifyPrimaryBootstrapReceipt,provesNoTargetStep,directTargetDisposition,RELAY,TARGET,PILOT,PRIMARY,ROLLING,DIRECT,DIRECT_TITLE,DIRECT_CONFIRM} from "./relay.mjs";
+import {runPulse,rootInputs,cronJobSpec,readPrimaryVerifyLog,verifyPrimaryBootstrapReceipt,provesNoTargetStep,directTargetDisposition,RELAY,TARGET,PILOT,PRIMARY,ROLLING,DIRECT,DIRECT_TITLE,DIRECT_CONFIRM,DIRECT_VERIFY_TITLE,DIRECT_VERIFY_CONFIRM} from "./relay.mjs";
 const NOW=Date.parse("2026-11-18T06:00:00.000Z"),SHA="a".repeat(40),LOCAL="b".repeat(40);
 const tok="github_pat_"+ "x".repeat(30),root="https://api.github.com/repos/";
 const wrap=(data,status=200)=>({status,ok:status===200,json:async()=>data});
@@ -39,7 +39,7 @@ function f(mode,fault=""){
    assert.equal(init.redirect,"error");assert.equal(init.headers,undefined);
    return new Response("timestamp "+JSON.stringify(fault==="notZero"?{...bootStatus,before:{...bootStatus.before,hardDueOriginals:1}}:bootStatus),{status:200});
   }
-  if(url===root+TARGET+"/actions/runs/201")return wrap(fault==="targetFailed"?{...row(201,wf),conclusion:"failure"}:{...row(201,wf,SHA,"queued"),...(wf===DIRECT?{display_title:DIRECT_TITLE}:{})});
+  if(url===root+TARGET+"/actions/runs/201")return wrap(fault==="targetFailed"?{...row(201,wf),conclusion:"failure"}:{...row(201,wf,SHA,"queued"),...(wf===DIRECT?{display_title:env.TRAVNR_RELAY_ROLLING_ROUTE==="DIRECT_VERIFY"?DIRECT_VERIFY_TITLE:DIRECT_TITLE}:{})});
   if(wf===DIRECT&&url.includes("/actions/workflows/"+ROLLING+"/runs?"))
    return wrap({total_count:fault==="directOldActive"&&url.includes("status=queued")?1:0,workflow_runs:fault==="directOldActive"&&url.includes("status=queued")?[row(301,ROLLING,SHA,"queued")]:[]});
   if(wf===DIRECT&&url.includes("/actions/workflows/"+DIRECT+"/runs?")&&url.includes("&created=")){
@@ -47,7 +47,7 @@ function f(mode,fault=""){
    if(fault==="directPriorFailure"&&status==="failure")return wrap({total_count:1,workflow_runs:[{...row(113,DIRECT),conclusion:"failure",display_title:DIRECT_TITLE}]});
    if(["directRecent","directOld","directMissingMarker","directSafeHold"].includes(fault)&&status==="success"){
     const created=fault==="directRecent"?NOW-3*60000:NOW-15*60000;
-    return wrap({total_count:1,workflow_runs:[{...row(113,DIRECT),created_at:new Date(created).toISOString(),display_title:DIRECT_TITLE}]});
+    return wrap({total_count:1,workflow_runs:[{...row(113,DIRECT),created_at:new Date(created).toISOString(),display_title:env.TRAVNR_RELAY_ROLLING_ROUTE==="DIRECT_VERIFY"?DIRECT_VERIFY_TITLE:DIRECT_TITLE}]});
    }
    return wrap({total_count:0,workflow_runs:[]});
   }
@@ -57,7 +57,10 @@ function f(mode,fault=""){
     steps:[mk("Execute one direct recovery wave and reconcile exact parent ACKs"),mk("Preserve direct terminal operational receipt"),
      mk("Direct outcome TERMINAL_PARENT_ACKS_RECONCILED",fault==="directSafeHold"?"skipped":"success"),mk("Direct outcome PREFLIGHT_HOLD_NO_POST",fault==="directSafeHold"?"success":"skipped")]};
    if(fault==="directMissingMarker")j.steps.pop();
-   return wrap({total_count:2,jobs:[j,{...j,id:512,name:"offline-direct-recovery",conclusion:"skipped",steps:[]}]});
+   
+   if(env.TRAVNR_RELAY_ROLLING_ROUTE==="DIRECT_VERIFY"){j.name="direct-readonly-verify";j.steps=[mk("Verify exact direct wake and existing workflow metadata NO POST")];}
+   return wrap({total_count:3,jobs:[j,{...j,id:512,name:"offline-direct-recovery",conclusion:"skipped",steps:[]},
+    {...j,id:513,name:env.TRAVNR_RELAY_ROLLING_ROUTE==="DIRECT_VERIFY"?"direct-protected-recovery-tick":"direct-readonly-verify",conclusion:"skipped",steps:[]}]});
   }
   if(url.includes("/actions/runs/112/jobs"))return wrap({total_count:2,jobs:[{id:501,name:"one-protected-bounded-session",run_id:112,head_sha:SHA,run_attempt:1,status:"completed",conclusion:fault==="skip"?"skipped":"success",steps:fault==="skip"?[]:[{name:"Execute one protected rolling session"}]},{id:502,name:"offline-bounded-session-reconciliation",run_id:112,head_sha:SHA,run_attempt:1,status:"completed",conclusion:"skipped",steps:[]}]});
   if(url.includes("/actions/runs/111/jobs"))return wrap({total_count:1,jobs:[{name:"primary-fids-expiry",run_id:111,head_sha:SHA,run_attempt:1,status:"completed",conclusion:"success",completed_at:new Date(NOW-(fault==="recent"?5:40)*60000).toISOString(),steps:[{name:"Verify exact main and execute only bounded primary FIDS expiry",status:"completed",conclusion:"success"}]}]});
@@ -215,4 +218,17 @@ test("direct route refuses absent approval, prior root failure, recent or malfor
 });
 test("direct route unknown ACK never falls back to rolling root or repeats",async()=>{
  const x=directFixture("directAck");await assert.rejects(runPulse(x.env,x.opts),/NO_BLIND_REPLAY/);assert.equal(x.posts(),1);
+});
+
+test("bounded direct VERIFY reuses one wake without paid policy and cannot set tick approval",async()=>{
+ for(const fault of ["directFresh","directOld"]){
+  const x=directFixture(fault);Object.assign(x.env,{TRAVNR_RELAY_ROLLING_ROUTE:"DIRECT_VERIFY",TRAVNR_RELAY_DIRECT_TICK_APPROVED:"0"});
+  delete x.env.TRAVNR_ROLLING_POLICY_FROM_UTC;delete x.env.TRAVNR_ROLLING_POLICY_UNTIL_UTC;
+  const out=await runPulse(x.env,x.opts);assert.equal(out.targetWorkflow,DIRECT);assert.equal(x.posts(),1);
+  assert.deepEqual(x.body().inputs,{confirm:DIRECT_VERIFY_CONFIRM,approved_main_sha:SHA});
+ }
+ const y=directFixture();y.env.TRAVNR_RELAY_ROLLING_ROUTE="DIRECT_VERIFY";
+ assert.match((await runPulse(y.env,y.opts)).reason,/DIRECT_TICK_NOT_SEPARATELY_APPROVED/);assert.equal(y.posts(),0);
+ const z=directFixture();Object.assign(z.env,{TRAVNR_RELAY_ROLLING_ROUTE:"DIRECT_VERIFY",TRAVNR_RELAY_DIRECT_TICK_APPROVED:"0",TRAVNR_RELAY_ROLLING_SINCE_UTC:new Date(NOW-116*60000).toISOString()});
+ assert.equal((await runPulse(z.env,z.opts)).status,"DEFER_OUTSIDE_OR_LATE_POLICY_WINDOW");assert.equal(z.posts(),0);
 });
