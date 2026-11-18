@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {PILOT,REPO,WF,config,validateJob,planned,classify,ack,verifyReceipt,samples,audit,observeTargetStep,leaseHealth,shadowConfigs} from "./cron-audit.mjs";
+import {PILOT,REPO,WF,config,validateJob,planned,classify,ack,verifyReceipt,samples,audit,observeTargetStep,leaseHealth,shadowConfigs,repairedShadowConfigs} from "./cron-audit.mjs";
 const c=PILOT,base="https://api.github.com/repos/"+REPO,url=base+"/actions/workflows/"+WF+"/dispatches";
 const now=Date.parse("2026-11-18T07:56:00Z"),slots=planned(c,"PILOT",now),p=slots[0];
 const row=(s=p,n=1)=>({jobId:c.jobId,datePlanned:s,date:s+1,jitter:1200,identifier:"history-"+n,url,status:1,httpStatus:200});
@@ -110,4 +110,15 @@ test("shadow clock requires actual shadow receipt AND skipped target-forward job
  assert.equal(verifyReceipt(q,a.r,101,run,jobs,log).status,"SHADOW_LANE_PROVEN_NO_FORWARD");
  assert.throws(()=>verifyReceipt(q,a.r,101,run,{total_count:3,jobs:[jobs.jobs[0],{...forward,conclusion:"success"},offline]},log),/SHADOW_FORWARD_NOT_SKIPPED/);
  assert.throws(()=>verifyReceipt(q,a.r,101,run,jobs,a.log),/RECEIPT_COUNT/);
+});
+
+test("repaired pair retains original failed history but only evaluates future post-readback slots",()=>{
+ const pin="a".repeat(40),a={status:"EXACT_EXISTING_PAIR_AUTH_REPAIRED_NO_FORWARD",relayPin:pin,until:"2026-12-19T08:00:00.000Z",probeRunId:81,probeJobId:82,cronMutations:2,providerCalls:0,databaseWrites:0,targetDispatches:0,paidAuthorityGranted:false,jobs:[{lane:"PRIMARY_BACKSTOP",jobId:8890475,attemptUtc:"2026-11-18T11:10:00.000Z",readbackUtc:"2026-11-18T11:10:01.000Z"},{lane:"ROLLING_ROOT",jobId:8890476,attemptUtc:"2026-11-18T11:10:02.000Z",readbackUtc:"2026-11-18T11:10:03.000Z"}]};
+ const [c]=repairedShadowConfigs(JSON.stringify(a),pin);
+ assert.equal(c.originalFrom,"2026-11-18T10:05:06.006Z");assert.equal(c.from,a.jobs[0].readbackUtc);
+ const slots=planned(c,"SHADOW",Date.parse("2026-11-18T12:10:03Z"));assert(slots.every(t=>t*1000>Date.parse(c.from)));
+ const old=Date.parse("2026-11-18T10:19:00Z")/1000,history=[{jobId:c.jobId,datePlanned:old,date:old,jitter:0,identifier:"old",url:"https://api.github.com/repos/HKcode22/TravnrClockRelay/actions/workflows/external-clock.yml/dispatches",status:4,httpStatus:401}];
+ const out=classify(c,slots,history);assert.equal(out.unexpected,0);assert(out.rows.every(x=>x.status==="UNOBSERVED_CRON_TICK"));
+ assert.throws(()=>repairedShadowConfigs(JSON.stringify({...a,probeRunId:0}),pin),/REPAIR_RECEIPT_SCOPE/);
+ assert.throws(()=>repairedShadowConfigs(JSON.stringify({...a,jobs:[{...a.jobs[0],attemptUtc:"2026-11-18T10:05:06.006Z"},a.jobs[1]]}),pin),/REPAIR_BOUNDARY/);
 });
