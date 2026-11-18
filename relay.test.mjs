@@ -111,3 +111,13 @@ test("missing target job or started target step never proves safe recovery",()=>
 });
 
 test("multi-lane recovery cannot forward from an uncommissioned target environment",async()=>{const x=multi("ROLLING_ROOT");delete x.env.TRAVNR_TARGET_FORWARD_ENV_READY;const r=await runPulse(x.env,x.opts);assert.equal(r.status,"EXTERNAL_WAKE_PREFLIGHT_DEFERRED_NO_POST");assert.equal(r.reason,"HOLD_EXTERNAL_CLOCK_TARGET_FORWARD_ENV_NOT_COMMISSIONED");assert.equal(x.posts(),0)});
+
+test("each shadow recovery clock is secret-free and touches only its own run metadata",async()=>{
+ for(const lane of ["PRIMARY_BACKSTOP","ROLLING_ROOT"]){
+  const x=f(lane);Object.assign(x.env,{TRAVNR_RELAY_MODE:"SHADOW_PAIR",TRAVNR_RELAY_LANE:lane,TRAVNR_TARGET_ACTIONS_TOKEN:""});
+  const fetcher=x.opts.fetcher;let reads=0;
+  x.opts.fetcher=async(url,init)=>{assert.equal(url,root+RELAY+"/actions/runs/100");assert.equal(init.method,"GET");reads++;return fetcher(url,init);};
+  const a=await runPulse(x.env,x.opts);assert.equal(a.status,"EXTERNAL_RECOVERY_LANE_SHADOW_OBSERVED_NO_TARGET_DISPATCH");assert.equal(a.mode,lane);assert.equal(a.relayDispatches,0);assert.equal(reads,1);
+  await assert.rejects(runPulse({...x.env,TRAVNR_TARGET_ACTIONS_TOKEN:tok},x.opts),/SCOPE/);
+ }
+});

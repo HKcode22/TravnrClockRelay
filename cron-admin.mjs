@@ -3,7 +3,7 @@
  * to cron service as destination auth. No production token or database here.
  * No automatic create/enable/rekey/replay. */
 import {dirname,isAbsolute,resolve} from "node:path";
-import {existsSync,lstatSync,openSync,writeFileSync,fsyncSync,closeSync} from "node:fs";
+import {existsSync,lstatSync,openSync,writeFileSync,fsyncSync,closeSync,appendFileSync} from "node:fs";
 import {execFileSync} from "node:child_process";
 import {fileURLToPath} from "node:url";
 import {PILOT,REPO,WF,validateJob} from "./cron-audit.mjs";
@@ -121,6 +121,35 @@ export async function createDisabledPair({until,token,now,jobId,confirm,pin,env}
  return {status:"MANAGED_RECOVERY_PAIR_DISABLED_VERIFIED_NO_FORWARD",jobs:verified,
   until,relayPin:pin,cronMutations:2,...zero};
 }
+/** Activate the already verified pair solely for secret-free observations.
+ * Fixed actual IDs; both exact disabled readbacks before any mutation.
+ * Never forward, recreate, roll back, or repeat an ambiguous mutation. */
+export const ACTUAL_PAIR=Object.freeze([{lane:"PRIMARY_BACKSTOP",jobId:8890475},{lane:"ROLLING_ROOT",jobId:8890476}].map(Object.freeze));
+export async function enableShadowPair({until,token,now,jobId,confirm,pin,env},{request,main,emit=()=>{}}){
+ if(confirm!=="ENABLE_EXACT_EXISTING_PAIR_SHADOW_NO_FORWARD"||jobId!==null||!sha(pin)||
+    until!=="2026-12-19T08:00:00.000Z"||env?.TRAVNR_RELAY_MODE!=="CLOCK_ONLY"||
+    [env?.TRAVNR_RELAY_PRIMARY_ENABLED,env?.TRAVNR_RELAY_ROLLING_ENABLED,env?.TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED].some(v=>v==="1"))
+   HOLD("SHADOW_PAIR_SCOPE");
+ const stable=async()=>{if(await main()!==pin)HOLD("RELAY_MAIN_DRIFT")};
+ const specs=ACTUAL_PAIR.map(v=>managedSpec({lane:v.lane,until,token,now}));
+ await stable();const before=await request("GET","/jobs");
+ for(let i=0;i<ACTUAL_PAIR.length;i++){
+  const v=ACTUAL_PAIR[i];listMatch(before,specs[i],v.jobId,now);
+  exactManaged((await request("GET","/jobs/"+v.jobId)).jobDetails,specs[i],v.jobId,false);
+ }
+ const receipts=[];
+ for(let i=0;i<ACTUAL_PAIR.length;i++){
+  const v=ACTUAL_PAIR[i];await stable();
+  const attemptUtc=iso(Date.now());emit({status:"SHADOW_LANE_ENABLE_ATTEMPT_NO_REPLAY",...v,attemptUtc,relayPin:pin});
+  await request("PATCH","/jobs/"+v.jobId,{job:{enabled:true}});
+  exactManaged((await request("GET","/jobs/"+v.jobId)).jobDetails,specs[i],v.jobId,true);
+  const readbackUtc=iso(Date.now());if(Date.parse(readbackUtc)-Date.parse(attemptUtc)>60000)HOLD("SHADOW_ENABLE_BOUNDARY");
+  receipts.push({...v,attemptUtc,readbackUtc});
+  emit({status:"SHADOW_LANE_ENABLED_READBACK_NO_FORWARD",...receipts.at(-1),relayPin:pin});
+ }
+ await stable();
+ return {status:"EXACT_EXISTING_PAIR_SHADOW_ENABLED_NO_FORWARD",relayPin:pin,until,jobs:receipts,cronMutations:2,...zero};
+}
 /** Renew the same live lease, without enabling, re-keying or changing
  * cadence. Exact old expiry is a compare-before-write guard, not a remote CAS.
  * Unknown PATCH outcome requires independent readback, never automatic retry.
@@ -183,7 +212,8 @@ function requestWith(key,pair=false){
 async function main(){
  const e=process.env,local=process.argv[2]==="--owner-rekey-pilot";
  if(e.DATABASE_URL||e.RAPIDAPI_KEY||e.AERODATABOX_API_KEY||e.TRAVNR_TARGET_ACTIONS_TOKEN||e.NODE_TLS_REJECT_UNAUTHORIZED==="0")HOLD("FORBIDDEN_CREDENTIAL_SCOPE");
- const pair=!local&&e.TRAVNR_MANAGED_OP==="CREATE_DISABLED_PAIR";
+ const shadow=!local&&e.TRAVNR_MANAGED_OP==="ENABLE_SHADOW_PAIR";
+ const pair=!local&&(shadow||e.TRAVNR_MANAGED_OP==="CREATE_DISABLED_PAIR");
  const request=requestWith(e.TRAVNR_CRON_ACCOUNT_KEY,pair),token=e.TRAVNR_CRON_RELAY_TOKEN,emit=x=>console.log(JSON.stringify(x));
  const main=async()=>{
   if(local){try{return JSON.parse(execFileSync("gh",["api","--hostname","github.com","--method","GET","repos/"+REPO+"/git/ref/heads/main"],{env:{PATH:e.PATH,HOME:e.HOME,GH_PROMPT_DISABLED:"1",...(e.GH_CONFIG_DIR?{GH_CONFIG_DIR:e.GH_CONFIG_DIR}:{}),...(e.GH_TOKEN?{GH_TOKEN:e.GH_TOKEN}:{})},encoding:"utf8",timeout:15000,maxBuffer:32768,stdio:["ignore","pipe","ignore"]})).object?.sha}catch{HOLD("LOCAL_GITHUB_READ")}}
@@ -214,7 +244,11 @@ async function main(){
  if(pair&&e.TRAVNR_MANAGED_LANE!=="RECOVERY_PAIR")HOLD("PAIR_LANE");
  const cfg={op:e.TRAVNR_MANAGED_OP,lane:e.TRAVNR_MANAGED_LANE,until:e.TRAVNR_MANAGED_UNTIL_UTC,priorUntil:e.TRAVNR_MANAGED_PRIOR_UNTIL_UTC,token,now:Date.now(),jobId,
   confirm:e.TRAVNR_MANAGED_CONFIRM,pin:e.GITHUB_SHA,env:e};
- const out=await (pair?createDisabledPair:cfg.op==="RENEW_EXACT_LEASE"?renewExactLease:manage)(cfg,{request,main,emit});
+ const out=await (shadow?enableShadowPair:pair?createDisabledPair:cfg.op==="RENEW_EXACT_LEASE"?renewExactLease:manage)(cfg,{request,main,emit});
+ if(shadow){
+  if(!e.GITHUB_OUTPUT||out.status!=="EXACT_EXISTING_PAIR_SHADOW_ENABLED_NO_FORWARD")HOLD("SHADOW_OUTPUT_SCOPE");
+  appendFileSync(e.GITHUB_OUTPUT,"shadow_receipt="+JSON.stringify(out)+"\n");
+ }
  console.log(JSON.stringify(out));
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url))main().catch(e=>{console.error(/^HOLD_CRON_(ADMIN|MANAGER)_[A-Z0-9_]+$/.test(e?.message||"")?e.message:"HOLD_CRON_ADMIN_REDACTED_INSPECT_NO_REPLAY");process.exitCode=2});

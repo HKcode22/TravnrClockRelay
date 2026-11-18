@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {managedSpec,exactManaged,manage,createDisabledPair,renewExactLease,rekeyPilot,LANES} from "./cron-admin.mjs";
+import {managedSpec,exactManaged,manage,createDisabledPair,enableShadowPair,ACTUAL_PAIR,renewExactLease,rekeyPilot,LANES} from "./cron-admin.mjs";
 import {PILOT} from "./cron-audit.mjs";
 const pin="a".repeat(40),now=Date.parse("2026-11-18T08:00:00Z"),until="2026-11-20T08:00:00.000Z",tok="github_pat_"+"t".repeat(40),newTok="github_pat_"+"n".repeat(40);
 const ops={CREATE_DISABLED:"CREATE_EXACT_DISABLED_MANAGED_CRON_JOB",ENABLE_EXACT:"ENABLE_EXACT_MANAGED_CRON_JOB",DISABLE_EXACT:"DISABLE_EXACT_MANAGED_CRON_JOB"};
@@ -118,3 +118,32 @@ test("already renewed exact lease is readback-only",async()=>{const f=renewalFix
 test("disabled, different expiry or credential drift cannot renew",async()=>{for(const fault of ["disabled","otherExpiry","tokenDrift"]){const f=renewalFixture(fault);await assert.rejects(renewExactLease(f.args,f));assert.deepEqual(f.calls,["GET","GET"])}});
 test("too early, expired, overlong or non-extending renewal is refused before network",async()=>{for(const patch of [{now:now-8*86400000},{now:Date.parse(until)},{until:"2026-12-05T08:00:00.000Z"},{until}]){const f=renewalFixture();await assert.rejects(renewExactLease({...f.args,...patch},f),/RENEW_BOUNDS/);assert.equal(f.calls.length,0)}});
 test("uncertain renewal response does not repeat PATCH",async()=>{const f=renewalFixture("unknown");await assert.rejects(renewExactLease(f.args,f));assert.deepEqual(f.calls,["GET","GET","PATCH"])});
+
+function shadowFixture(fault=""){
+ const cfg={until:"2026-12-19T08:00:00.000Z",token:tok,now,jobId:null,confirm:"ENABLE_EXACT_EXISTING_PAIR_SHADOW_NO_FORWARD",pin,env:{TRAVNR_RELAY_MODE:"CLOCK_ONLY"}};
+ const store=new Map(ACTUAL_PAIR.map(v=>[v.jobId,{jobId:v.jobId,...managedSpec({lane:v.lane,until:cfg.until,token:tok,now})}]));
+ if(fault==="drift")store.get(8890476).enabled=true;
+ const calls=[],events=[];
+ const request=async(method,path,body)=>{
+  calls.push({method,path});
+  if(path==="/jobs")return {someFailed:false,jobs:[...store.values()]};
+  const n=Number(path.split("/").at(-1)),j=store.get(n);
+  if(method==="GET")return {jobDetails:j};
+  assert.equal(method,"PATCH");assert.deepEqual(body,{job:{enabled:true}});
+  if(fault==="unknown"&&n===8890476)throw Error("unknown second ACK");
+  store.set(n,{...j,enabled:true});return {};
+ };
+ return {cfg,calls,events,request,main:async()=>pin,emit:x=>events.push(x)};
+}
+test("shadow pair uses both exact disabled IDs, two enables and verified timestamps",async()=>{
+ const f=shadowFixture(),a=await enableShadowPair(f.cfg,f);
+ assert.equal(a.status,"EXACT_EXISTING_PAIR_SHADOW_ENABLED_NO_FORWARD");assert.deepEqual(a.jobs.map(x=>x.jobId),[8890475,8890476]);assert.equal(a.cronMutations,2);assert.equal(a.targetDispatches,0);
+ assert.deepEqual(f.calls.map(x=>x.method),["GET","GET","GET","PATCH","GET","PATCH","GET"]);assert(!JSON.stringify(a).includes(tok));
+});
+test("shadow pair refuses any forwarding flags or partially enabled starting state",async()=>{
+ for(const patch of [{TRAVNR_RELAY_MODE:"MULTI_LANE"},{TRAVNR_RELAY_PRIMARY_ENABLED:"1"},{TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED:"1"}]){const f=shadowFixture();await assert.rejects(enableShadowPair({...f.cfg,env:{...f.cfg.env,...patch}},f),/SHADOW_PAIR_SCOPE/);assert.equal(f.calls.length,0);}
+ const f=shadowFixture("drift");await assert.rejects(enableShadowPair(f.cfg,f),/JOB_READBACK/);assert(f.calls.every(x=>x.method==="GET"));
+});
+test("uncertain second enable remains explicit partial state; no repeat or rollback",async()=>{
+ const f=shadowFixture("unknown");await assert.rejects(enableShadowPair(f.cfg,f));assert.equal(f.calls.filter(x=>x.method==="PATCH").length,2);assert.equal(f.events.filter(x=>x.status==="SHADOW_LANE_ENABLED_READBACK_NO_FORWARD").length,1);
+});
