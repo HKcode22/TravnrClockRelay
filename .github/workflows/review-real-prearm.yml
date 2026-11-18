@@ -1,0 +1,55 @@
+name: Actual pinned production 90-minute prearm clock rehearsal (no provider)
+on:
+  pull_request:
+    types: [opened]
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: actual-90-minute-prearm-nov18-once
+  cancel-in-progress: false
+jobs:
+  exact-production-wait:
+    if: >-
+      github.repository == 'HKcode22/TravnrClockRelay' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == 'HKcode22' &&
+      github.head_ref == 'review/nov18-actual-90min-prearm' &&
+      github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 105
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: HKcode22/ReplitTranvr
+          ref: 45d04392e2eecfc1220230f252d2ada8cc6137e0
+          path: reviewed-production
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify exact production blobs and install pinned dependencies without lifecycle hooks
+        working-directory: reviewed-production
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = 45d04392e2eecfc1220230f252d2ada8cc6137e0
+          test "$(git hash-object server/lib/disruption/phase5V0080GitHubPrearm_v39.ts)" = 8d32ddaaa1994f8759c3fcf6d4301dec50b3abab
+          test "$(git hash-object server/lib/disruption/phase5SourceUpcomingDueQueueReadonly_v39.ts)" = ec929591937fb48c37cb5808024278b28f9e4d01
+          npm ci --include=dev --ignore-scripts --no-audit --no-fund
+      - name: Execute actual exact wait helper with local runner clock, no reservation
+        env:
+          DATABASE_URL: ''
+          V39_P5_SOURCE_DATABASE_URL: ''
+          V39_DATABASE_RUNTIME_URL: ''
+          AERODATABOX_API_KEY: ''
+          RAPIDAPI_KEY: ''
+          AERODATABOX_WEBHOOK_SECRET: ''
+          TRAVNR_TARGET_ACTIONS_TOKEN: ''
+          TRAVNR_CRON_ACCOUNT_KEY: ''
+          TRAVNR_CRON_RELAY_TOKEN: ''
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+        run: reviewed-production/node_modules/.bin/tsx review-real-prearm.mjs --actual
