@@ -1,0 +1,86 @@
+name: Managed isolated Cron provisioning (manual, STOP default)
+on:
+  pull_request:
+    branches: [main]
+    paths: ['cron-admin.mjs','cron-admin.test.mjs','cron-audit.mjs','owner-cron-custody.mjs','owner-cron-custody.test.mjs','.github/workflows/cron-admin.yml']
+  workflow_dispatch:
+    inputs:
+      operation:
+        required: true
+        type: choice
+        options: [CREATE_DISABLED, ENABLE_EXACT, DISABLE_EXACT]
+        default: CREATE_DISABLED
+      lane:
+        required: true
+        type: choice
+        options: [CLOCK_ONLY, PRIMARY_BACKSTOP, ROLLING_ROOT]
+        default: CLOCK_ONLY
+      job_id:
+        type: string
+        default: ''
+      expires_utc:
+        description: 'Exact reviewed UTC expiry ISO instant, including milliseconds'
+        required: true
+        type: string
+      approved_relay_main_sha:
+        required: true
+        type: string
+      confirm:
+        description: 'Exact operation-specific confirmation, no implicit approval'
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: managed-cron-write-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'main' }}
+  cancel-in-progress: false
+jobs:
+  offline-tests:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - run: node --check cron-admin.mjs && node --check owner-cron-custody.mjs && node --test cron-admin.test.mjs owner-cron-custody.test.mjs
+  exact-manual-management:
+    if: >-
+      github.repository == 'HKcode22/TravnrClockRelay' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+      github.run_attempt == 1 && inputs.approved_relay_main_sha == github.sha &&
+      ((inputs.operation == 'CREATE_DISABLED' && inputs.confirm == 'CREATE_EXACT_DISABLED_MANAGED_CRON_JOB') ||
+      (inputs.operation == 'ENABLE_EXACT' && inputs.confirm == 'ENABLE_EXACT_MANAGED_CRON_JOB') ||
+      (inputs.operation == 'DISABLE_EXACT' && inputs.confirm == 'DISABLE_EXACT_MANAGED_CRON_JOB'))
+    environment: travnr-cron-management
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - name: Execute one exact Cron management operation; do not replay an unknown response
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TRAVNR_CRON_ACCOUNT_KEY: ${{ secrets.TRAVNR_CRON_ACCOUNT_KEY }}
+          TRAVNR_CRON_MANAGEMENT_ENV_READY: ${{ vars.TRAVNR_CRON_MANAGEMENT_ENV_READY }}
+          TRAVNR_CRON_RELAY_TOKEN: ${{ inputs.operation != 'DISABLE_EXACT' && secrets.TRAVNR_CRON_RELAY_TOKEN || '' }}
+          TRAVNR_MANAGED_OP: ${{ inputs.operation }}
+          TRAVNR_MANAGED_LANE: ${{ inputs.lane }}
+          TRAVNR_MANAGED_JOB_ID: ${{ inputs.job_id }}
+          TRAVNR_MANAGED_UNTIL_UTC: ${{ inputs.expires_utc }}
+          TRAVNR_APPROVED_RELAY_MAIN_SHA: ${{ inputs.approved_relay_main_sha }}
+          TRAVNR_MANAGED_CONFIRM: ${{ inputs.confirm }}
+          TRAVNR_RELAY_MODE: ${{ vars.TRAVNR_RELAY_MODE }}
+          TRAVNR_RELAY_PRIMARY_ENABLED: ${{ vars.TRAVNR_RELAY_PRIMARY_ENABLED }}
+          TRAVNR_RELAY_ROLLING_ENABLED: ${{ vars.TRAVNR_RELAY_ROLLING_ENABLED }}
+          TRAVNR_APPROVED_TARGET_MAIN_SHA: ${{ vars.TRAVNR_APPROVED_TARGET_MAIN_SHA }}
+          TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED: ${{ vars.TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED }}
+          TRAVNR_TARGET_ACTIONS_TOKEN: ''
+          DATABASE_URL: ''
+          AERODATABOX_API_KEY: ''
+          RAPIDAPI_KEY: ''
+        run: node cron-admin.mjs

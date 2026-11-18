@@ -11,6 +11,8 @@ const sha=x=>typeof x==="string"&&/^[a-f0-9]{40}$/.test(x);
 const stamp=s=>{let n=Date.parse(s);if(!Number.isFinite(n)||new Date(n).toISOString()!==s)HOLD("UTC");return n;};
 const iso=n=>new Date(n).toISOString();
 const active=["queued","in_progress","waiting","requested","pending"];
+const MULTI_LANES=["CLOCK_ONLY","PRIMARY_BACKSTOP","ROLLING_ROOT"];
+const laneTitle=lane=>"TRAVNR EXTERNAL CLOCK "+lane;
 const result=(status,fields={})=>({status,...fields,providerCallsByRelay:0,databaseReadsByRelay:0,databaseWritesByRelay:0,paidAuthorityGranted:false});
 export function rootInputs(now,from,until,main,four){
  // This is only a prospective scheduling hint. The target's existing V0102
@@ -36,11 +38,75 @@ export function cronJobSpec(relayToken,now=Date.now()){
   extendedData:{headers:{Authorization:"Bearer "+relayToken,Accept:"application/vnd.github+json","Content-Type":"application/json","X-GitHub-Api-Version":"2022-11-28"},
    body:JSON.stringify({ref:"main",return_run_details:true})}};
 }
+const PRIMARY_STEP="Verify exact main and execute only bounded primary FIDS expiry";
+const PRIMARY_COUNTERS=["liveOriginals","eligibleOriginals","hardDueOriginals","eligibleNextHour","hardDueNextHour","unboundLiveOriginals","markedExpiredPayloadPresent","unlinkedUnexpiredPopulation","unexpiredPopulationWithoutLiveOriginal"];
+const gitAuth=token=>({Accept:"application/vnd.github+json",Authorization:"Bearer "+token,"X-GitHub-Api-Version":"2022-11-28"});
+/** GitHub returns a short-lived signed job-log URL. Never forward bearer
+ * auth to storage. Bounded read, no raw log/content printed. */
+export async function readPrimaryVerifyLog(fetcher,token,jobId){
+ if(!id(jobId)||typeof token!=="string"||token.length<16)HOLD("PRIMARY_VERIFY_LOG_SCOPE");
+ const a=await fetcher(ROOT+TARGET+"/actions/jobs/"+jobId+"/logs",{method:"GET",headers:gitAuth(token),redirect:"manual",signal:AbortSignal.timeout(10000)});
+ if(a.status!==302)HOLD("PRIMARY_VERIFY_LOG_REDIRECT_HTTP_"+a.status);
+ let u;try{u=new URL(a.headers.get("location"));}catch{HOLD("PRIMARY_VERIFY_LOG_LOCATION");}
+ if(u.protocol!=="https:"||u.username||u.password||u.port||u.hash||
+    !(/^[a-z0-9.-]+\.blob\.core\.windows\.net$/.test(u.hostname)||/^[a-z0-9.-]+\.githubusercontent\.com$/.test(u.hostname)))
+  HOLD("PRIMARY_VERIFY_LOG_HOST");
+ const z=await fetcher(u.href,{method:"GET",redirect:"error",signal:AbortSignal.timeout(15000)});
+ if(!z.ok||!z.body||typeof z.body.getReader!=="function")HOLD("PRIMARY_VERIFY_LOG_READ_HTTP_"+z.status);
+ const reader=z.body.getReader(),decoder=new TextDecoder(),limit=2*1024*1024;let bytes=0,log="";
+ try{while(true){const q=await reader.read();if(q.done)break;bytes+=q.value.byteLength;if(bytes>limit)HOLD("PRIMARY_VERIFY_LOG_SIZE");log+=decoder.decode(q.value,{stream:true});}log+=decoder.decode();}
+ finally{await reader.cancel().catch(()=>{});reader.releaseLock();}
+ return log;
+}
+/** Reuse the existing owner's exact VERIFY-only receipt semantics for the
+ * first backstop wake after a reviewed main transition. Not APPLY cadence. */
+export function verifyPrimaryBootstrapReceipt(run,jobs,log,expectedSha,runId,clock){
+ if(run?.id!==runId||run.head_sha!==expectedSha||run.path!==".github/workflows/"+PRIMARY||run.head_branch!=="main"||
+    run.event!=="workflow_dispatch"||run.run_attempt!==1||run.status!=="completed"||run.conclusion!=="success"||
+    jobs?.total_count!==1||jobs.jobs?.length!==1)HOLD("PRIMARY_BOOTSTRAP_VERIFY_IDENTITY");
+ const j=jobs.jobs[0];
+ if(!id(j.id)||j.name!=="primary-fids-expiry"||j.run_id!==runId||j.head_sha!==expectedSha||j.run_attempt!==1||
+    j.status!=="completed"||j.conclusion!=="success"||
+    j.steps?.filter(s=>s.name===PRIMARY_STEP&&s.status==="completed"&&s.conclusion==="success").length!==1)
+  HOLD("PRIMARY_BOOTSTRAP_VERIFY_JOB");
+ const hits=String(log).split(/\r?\n/).filter(l=>l.includes('{"status":"PRIMARY_FIDS_VERIFY_ONLY_NO_WRITES"'));
+ if(hits.length!==1)HOLD("PRIMARY_BOOTSTRAP_VERIFY_RECEIPT_COUNT");
+ let r;try{r=JSON.parse(hits[0].slice(hits[0].indexOf('{"status":"PRIMARY_FIDS_VERIFY_ONLY_NO_WRITES"')).trim());}
+ catch{HOLD("PRIMARY_BOOTSTRAP_VERIFY_JSON");}
+ const b=r.before,seen=Date.parse(b?.observedAtUtc),created=Date.parse(run.created_at),finished=Date.parse(j.completed_at);
+ if(r.reviewedMainSha!==expectedSha||r.distinctDbActorsVerified!==true||r.privateCommissionState!=="GRANTED"||
+    r.providerCalls!==0||r.databaseWrites!==0||r.objectDeletions!==0||r.phase6PaidGo!==false||
+    r.backupOrPitrVerified!==false||r.completeRetentionDeploymentVerified!==false||
+    !b||b.schema!=="v39.phase5.primary-fids-expiry-status.v1"||PRIMARY_COUNTERS.some(k=>b[k]!==0)||
+    b.deletionStopUnresolved!==false||b.providerCalls!==0||b.databaseWrites!==0||b.phase6PaidGo!==false||
+    b.backupOrPitrVerified!==false||b.completeRetentionDeploymentVerified!==false||
+    ![seen,created,finished,clock].every(Number.isFinite)||seen<created||seen>finished+1000||finished>clock||clock-seen>6*3600000)
+  HOLD("PRIMARY_BOOTSTRAP_VERIFY_RECEIPT_REVIEW");
+ return {verifiedRunId:runId,verifiedJobId:j.id,observedAtUtc:iso(seen)};
+}
+/** Exact same-code failed run where the only forwarding step did not execute.
+ * Do not infer absence from missing step lists on an assigned runner. */
+export function provesNoTargetStep(run,jobs){
+ if(!run||!Number.isSafeInteger(run.id)||!sha(run.head_sha)||run.status!=="completed"||run.run_attempt!==1||
+    !Array.isArray(jobs)||jobs.length!==3||new Set(jobs.map(j=>j.id)).size!==3||
+    !jobs.every(j=>id(j.id)&&j.run_id===run.id&&j.head_sha===run.head_sha&&j.run_attempt===1&&j.status==="completed"))return false;
+ const named=new Map(jobs.map(j=>[j.name,j]));
+ if(named.size!==3||!["offline-tests","independent-pulse","target-forward"].every(k=>named.has(k)))return false;
+ if(!["offline-tests","independent-pulse"].every(k=>{const j=named.get(k);return j.conclusion==="skipped"&&(j.steps==null||Array.isArray(j.steps)&&j.steps.length===0)}))return false;
+ const j=named.get("target-forward");
+ if(j.conclusion==="skipped")return j.steps==null||Array.isArray(j.steps)&&j.steps.length===0;
+ if(!["failure","cancelled","timed_out"].includes(j.conclusion)||!Array.isArray(j.steps)||j.steps.length>20)return false;
+ const step=j.steps.filter(s=>s.name==="Run node cli.mjs");
+ return step.length===1&&step[0].status==="completed"&&step[0].conclusion==="skipped"&&
+   (step[0].started_at==null||step[0].started_at===step[0].completed_at);
+}
 export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep=ms=>new Promise(r=>setTimeout(r,ms))}={}){
- const mode=env.TRAVNR_RELAY_MODE||"CLOCK_ONLY", start=now(),runId=Number(env.GITHUB_RUN_ID);
+ const configured=env.TRAVNR_RELAY_MODE||"CLOCK_ONLY", lane=env.TRAVNR_RELAY_LANE||"CLOCK_ONLY",
+  multi=configured==="MULTI_LANE", mode=multi?lane:configured, start=now(),runId=Number(env.GITHUB_RUN_ID);
  if(env.GITHUB_ACTIONS!=="true"||env.GITHUB_REPOSITORY!==RELAY||env.GITHUB_REF!=="refs/heads/main"||
    env.GITHUB_EVENT_NAME!=="workflow_dispatch"||env.GITHUB_RUN_ATTEMPT!=="1"||!id(runId)||!sha(env.GITHUB_SHA)||
-   !["CLOCK_ONLY","PILOT","PRIMARY_BACKSTOP","ROLLING_ROOT"].includes(mode)||typeof env.GITHUB_TOKEN!=="string"||
+   !["CLOCK_ONLY","PILOT","PRIMARY_BACKSTOP","ROLLING_ROOT"].includes(mode)||
+   (multi?!MULTI_LANES.includes(lane):lane!=="CLOCK_ONLY")||typeof env.GITHUB_TOKEN!=="string"||
    env.GITHUB_TOKEN.length<16||env.NODE_TLS_REJECT_UNAUTHORIZED==="0"||
    ["DATABASE_URL","AERODATABOX_API_KEY","RAPIDAPI_KEY","V39_DATABASE_RUNTIME_URL","AERODATABOX_WEBHOOK_SECRET"].some(k=>env[k]))HOLD("SCOPE");
  let reads=0,attempted=false;
@@ -59,21 +125,46 @@ export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep
  const main=async()=>{const x=await get(TARGET,"/git/ref/heads/main");if(x?.object?.sha!==env.TRAVNR_APPROVED_TARGET_MAIN_SHA)HOLD("TARGET_MAIN_DRIFT");};
  try{
   const self=exact(await get(RELAY,"/actions/runs/"+runId),SELF,RELAY);
-  if(self.id!==runId||self.head_sha!==env.GITHUB_SHA||self.event!=="workflow_dispatch"||self.status!=="in_progress")HOLD("SELF_IDENTITY");
+  if(self.id!==runId||self.head_sha!==env.GITHUB_SHA||self.event!=="workflow_dispatch"||self.status!=="in_progress"||
+     multi&&self.display_title!==laneTitle(lane))HOLD("SELF_IDENTITY");
   const elapsed=now()-Date.parse(self.created_at);
   if(elapsed<0||elapsed>24*3600000)HOLD("SELF_CLOCK");
   const clock={relayRunId:runId,mode,actualCreatedUtc:self.created_at,runnerObservedUtc:iso(now()),creationToObservedMs:elapsed};
   if(mode==="CLOCK_ONLY")return result("EXTERNAL_CLOCK_OBSERVED_NO_TARGET_DISPATCH",clock);
+  const lanePrefix=mode==="PRIMARY_BACKSTOP"?"TRAVNR_RELAY_PRIMARY":"TRAVNR_RELAY_ROLLING";
+  if(multi&&env[lanePrefix+"_ENABLED"]!=="1")return result("DEFER_SEPARATE_LANE_OFF",clock);
   if(!sha(env.TRAVNR_APPROVED_TARGET_MAIN_SHA)||typeof env.TRAVNR_TARGET_ACTIONS_TOKEN!=="string"||env.TRAVNR_TARGET_ACTIONS_TOKEN.length<16)HOLD("TARGET_CONFIGURATION");
-  const since=stamp(env.TRAVNR_RELAY_MODE_SINCE_UTC);
+  const since=stamp(multi?env[lanePrefix+"_SINCE_UTC"]:env.TRAVNR_RELAY_MODE_SINCE_UTC);
   if(since>start||start-since>60*24*3600000)HOLD("MODE_CLOCK");
   // Any prior failed relay attempt in this owner-reviewed mode quarantines
   // uncertain POSTs indefinitely until mode is independently reconciled.
   // The date-filtered total_count is sufficient even if results paginate.
   for(const conclusion of ["failure","cancelled","timed_out","action_required","stale"]){
-   const p=await get(RELAY,"/actions/workflows/"+SELF+"/runs?branch=main&event=workflow_dispatch&status="+conclusion+"&per_page=1&created="+encodeURIComponent(">="+iso(since)));
-   if(!Number.isSafeInteger(p?.total_count)||p.total_count<0||!Array.isArray(p.workflow_runs)||p.workflow_runs.length!==Math.min(1,p.total_count))HOLD("PRIOR_RELAY_HISTORY");
-   if(p.total_count>0)return result("QUARANTINED_PRIOR_RELAY_RUN_REVIEW",clock);
+   const p=await get(RELAY,"/actions/workflows/"+SELF+"/runs?branch=main&event=workflow_dispatch&status="+conclusion+"&per_page="+(multi?100:1)+"&created="+encodeURIComponent(">="+iso(since)));
+   if(!Number.isSafeInteger(p?.total_count)||p.total_count<0||!Array.isArray(p.workflow_runs)||
+      p.workflow_runs.length!==Math.min(multi?100:1,p.total_count))HOLD("PRIOR_RELAY_HISTORY");
+   if(!multi&&p.total_count>0)return result("QUARANTINED_PRIOR_RELAY_RUN_REVIEW",clock);
+   if(multi){
+    if(p.total_count>100)HOLD("PRIOR_RELAY_HISTORY");
+    for(const row of p.workflow_runs){
+     const other=exact(row,SELF,RELAY);
+     if(other.status!=="completed"||other.conclusion!==conclusion||
+        Date.parse(other.created_at)<Math.floor(since/1000)*1000)HOLD("PRIOR_RELAY_HISTORY");
+     // Known other-lane failures do not couple the two recovery paths.
+     // For this lane, only exact current-code job metadata proving the
+     // *sole* target-capable step was skipped can remove quarantine.
+     // Any started/ambiguous step, old code, missing job or unknown title
+     // stays quarantined. No assumption from a failed workflow status.
+     if(!MULTI_LANES.some(l=>other.display_title===laneTitle(l)))
+      return result("QUARANTINED_PRIOR_RELAY_RUN_REVIEW",clock);
+     if(other.display_title===laneTitle(lane)){
+      if(other.head_sha!==env.GITHUB_SHA)return result("QUARANTINED_PRIOR_RELAY_RUN_REVIEW",clock);
+      const jobs=complete(await get(RELAY,"/actions/runs/"+other.id+"/jobs?filter=latest&per_page=100"),"jobs");
+      if(!provesNoTargetStep(other,jobs))return result("QUARANTINED_PRIOR_RELAY_RUN_REVIEW",clock);
+      emit({status:"PRIOR_RELAY_FAILURE_EXACT_TARGET_STEP_SKIPPED_NO_POST",priorRelayRunId:other.id,mode});
+     }
+    }
+   }
   }
   await main();
   const wf=mode==="PILOT"?PILOT:mode==="PRIMARY_BACKSTOP"?PRIMARY:ROLLING;
@@ -88,15 +179,38 @@ export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep
    // Exactly one existing nonpaid canary, only if not already running.
    inputs={mode:"OBSERVE"};
   }else if(mode==="PRIMARY_BACKSTOP"){
-   const p=await get(TARGET,"/actions/workflows/"+wf+"/runs?branch=main&per_page=1");
-   if(!Number.isSafeInteger(p?.total_count)||p.total_count<1||p.workflow_runs?.length!==1)HOLD("PRIMARY_HISTORY");
-   const last=exact(p.workflow_runs[0],wf,TARGET);
+   // A successful manual VERIFY shares the same job and step name as APPLY.
+   // Do not count it as proof the scheduled expiry actually ran.
+   const p=await get(TARGET,"/actions/workflows/"+wf+"/runs?branch=main&per_page=20");
+   if(!Number.isSafeInteger(p?.total_count)||p.total_count<0||!Array.isArray(p.workflow_runs)||
+      p.workflow_runs.length!==Math.min(20,p.total_count))HOLD("PRIMARY_HISTORY");
+   const eligible=p.workflow_runs.map(r=>exact(r,wf,TARGET)).filter(r=>r.head_sha===env.TRAVNR_APPROVED_TARGET_MAIN_SHA&&
+     (r.event==="schedule"||r.event==="workflow_dispatch"&&r.display_title==="P5 PRIMARY BACKSTOP CHILD"))
+     .sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)||b.id-a.id);
+   if(!eligible.length){
+    // A fresh, separately selected exact VERIFY receipt is only a bounded
+    // first-wake baseline. Never bypass a prior failed/unknown APPLY.
+    const v=env.TRAVNR_RELAY_PRIMARY_VERIFY_RUN_ID;
+    if(!v)return result("DEFER_NO_CURRENT_MAIN_APPLY_BASELINE_REVIEW",clock);
+    const verifyId=Number(v);
+    if(!/^[1-9][0-9]{0,14}$/.test(v)||!id(verifyId))HOLD("PRIMARY_BOOTSTRAP_VERIFY_ID");
+    const vr=exact(await get(TARGET,"/actions/runs/"+verifyId),wf,TARGET);
+    const vj=await get(TARGET,"/actions/runs/"+verifyId+"/jobs?filter=latest&per_page=100");
+    if(vr.head_sha!==env.TRAVNR_APPROVED_TARGET_MAIN_SHA||vr.status!=="completed"||vr.conclusion!=="success"||
+       vj?.total_count!==1||vj.jobs?.length!==1||!id(vj.jobs[0].id))HOLD("PRIMARY_BOOTSTRAP_VERIFY_SCOPE");
+    reads+=2;if(reads>40||now()-start>120000)HOLD("READ_BOUND");
+    const log=await readPrimaryVerifyLog(fetcher,env.TRAVNR_TARGET_ACTIONS_TOKEN,vj.jobs[0].id);
+    const proof=verifyPrimaryBootstrapReceipt(vr,vj,log,env.TRAVNR_APPROVED_TARGET_MAIN_SHA,verifyId,now());
+    emit({status:"EXTERNAL_FIRST_PRIMARY_WAKE_FROM_EXACT_VERIFY_NOT_APPLY_FRESHNESS",...proof});
+   }else{
+   const last=eligible[0];
    if(last.head_sha!==env.TRAVNR_APPROVED_TARGET_MAIN_SHA||last.status!=="completed"||last.conclusion!=="success")HOLD("PREVIOUS_PRIMARY_REVIEW");
    const js=complete(await get(TARGET,"/actions/runs/"+last.id+"/jobs?filter=latest&per_page=100"),"jobs");
    const good=js.filter(j=>j.name==="primary-fids-expiry"&&j.run_id===last.id&&j.head_sha===last.head_sha&&j.run_attempt===1&&j.status==="completed"&&j.conclusion==="success"&&
      j.steps?.filter(s=>s.name==="Verify exact main and execute only bounded primary FIDS expiry"&&s.status==="completed"&&s.conclusion==="success").length===1);
    if(good.length!==1||!Number.isFinite(Date.parse(good[0].completed_at))||Date.parse(good[0].completed_at)>now())HOLD("PRIMARY_STEP");
    if(now()-Date.parse(good[0].completed_at)<20*MIN)return result("DEFER_RECENT_PRIMARY_STEP_NOT_DELETION_PROOF",clock);
+   }
    inputs={confirm:"APPLY_REVIEWED_PRIMARY_FIDS_BACKSTOP_NO_PRIVATE_MUTATION",approved_main_sha:env.TRAVNR_APPROVED_TARGET_MAIN_SHA};
   }else{
    // Reuse existing manual dynamic root admission; do not simulate schedule
@@ -105,7 +219,26 @@ export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep
    if(!rootScope)return result("DEFER_OUTSIDE_OR_LATE_POLICY_WINDOW",clock);
    const startUtc=encodeURIComponent(">="+rootScope.windowStart);
    const current=complete(await get(TARGET,q+"&created="+startUtc),"workflow_runs").map(x=>exact(x,wf,TARGET));
-   if(current.length)return result("DEFER_CURRENT_WINDOW_HAS_CONTROLLER_RUN_NO_REPLAY",clock);
+   // A workflow record is not equivalent to a controller that executed.
+   // Re-admit only when every existing record is exact-current-main, terminal,
+   // and all jobs (including the protected session) independently prove SKIP.
+   // Unknown/failed/partially executed roots still require custody reconciliation.
+   if(current.length){
+    for(const r of current){
+     if(r.head_sha!==env.TRAVNR_APPROVED_TARGET_MAIN_SHA||r.status!=="completed"||
+        !["success","skipped"].includes(r.conclusion))
+       return result("DEFER_CURRENT_WINDOW_CUSTODY_REVIEW_NO_REPLAY",{...clock,existingRunId:r.id});
+     const jobs=complete(await get(TARGET,"/actions/runs/"+r.id+"/jobs?filter=latest&per_page=100"),"jobs");
+     const protectedJobs=jobs.filter(j=>j.name==="one-protected-bounded-session");
+     if(protectedJobs.length!==1||!jobs.every(j=>id(j.id)&&j.run_id===r.id&&j.head_sha===r.head_sha&&
+       j.run_attempt===1&&j.status==="completed"&&j.conclusion==="skipped"&&
+       (j.steps==null||Array.isArray(j.steps)&&j.steps.length===0)))
+       return result("DEFER_CURRENT_WINDOW_CUSTODY_REVIEW_NO_REPLAY",{...clock,existingRunId:r.id});
+    }
+    // This proves no protected session step ran, NOT that the DB window is free.
+    // The existing target's exact policy/atomic claim/previous closure gate is final.
+    emit({status:"EXTERNAL_WAKE_ONLY_SKIPPED_CONTROLLER_HISTORY_NO_DB_AUTHORITY",relayRunId:runId,skippedRuns:current.length});
+   }
    // The target validates its immutable policy and prior closure with its
    // scoped live DB claim, not the relay's advisory wall clock.
    inputs=rootScope.inputs;
