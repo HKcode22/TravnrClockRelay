@@ -2,7 +2,7 @@ name: Recovery delivery rehearsal (one nonpaid OBSERVE only)
 on:
   pull_request:
     branches: [main]
-    paths: ['target-rehearsal.mjs','target-rehearsal.test.mjs','.github/workflows/recovery-delivery-rehearsal.yml']
+    paths: ['target-rehearsal.mjs','target-rehearsal.test.mjs','owner-target-custody.mjs','owner-target-custody.test.mjs','.github/workflows/recovery-delivery-rehearsal.yml']
   workflow_dispatch:
     inputs:
       approved_relay_sha:
@@ -30,7 +30,7 @@ jobs:
         with: {persist-credentials: false}
       - uses: actions/setup-node@v4
         with: {node-version: '22'}
-      - run: node --check target-rehearsal.mjs && node --test target-rehearsal.test.mjs
+      - run: node --check target-rehearsal.mjs && node --check owner-target-custody.mjs && node --test target-rehearsal.test.mjs owner-target-custody.test.mjs
   protected-single-target-observation:
     if: >-
       github.repository == 'HKcode22/TravnrClockRelay' &&
@@ -51,6 +51,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           TRAVNR_TARGET_ACTIONS_TOKEN: ${{ secrets.TRAVNR_TARGET_ACTIONS_TOKEN }}
+          TRAVNR_TARGET_REHEARSAL_ENV_READY: ${{ vars.TRAVNR_TARGET_REHEARSAL_ENV_READY }}
           TRAVNR_REHEARSAL_RELAY_PIN: ${{ inputs.approved_relay_sha }}
           TRAVNR_REHEARSAL_TARGET_PIN: ${{ inputs.approved_target_sha }}
           TRAVNR_REHEARSAL_CONFIRM: ${{ inputs.confirm }}
