@@ -1,0 +1,56 @@
+name: Actual stored Cron authentication diagnosis (read-only)
+on:
+  pull_request:
+    branches: [main]
+    paths: ['cron-auth-diagnostic.mjs','cron-auth-diagnostic.test.mjs','.github/workflows/cron-auth-diagnostic.yml']
+  push:
+    branches: [main]
+    paths: ['cron-auth-diagnostic.mjs','.github/workflows/cron-auth-diagnostic.yml']
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: cron-auth-diagnosis-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'one-shot' }}
+  cancel-in-progress: false
+jobs:
+  offline:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - run: node --check cron-auth-diagnostic.mjs && node --test cron-auth-diagnostic.test.mjs
+  actual-readonly:
+    if: >-
+      github.repository == 'HKcode22/TravnrClockRelay' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      github.event.before == 'ed35a5467dda0afc75eda386ad43ee4f401b23c4' &&
+      github.run_attempt == 1 && vars.TRAVNR_RELAY_MODE == 'CLOCK_ONLY' &&
+      vars.TRAVNR_RELAY_PRIMARY_ENABLED != '1' && vars.TRAVNR_RELAY_ROLLING_ENABLED != '1' &&
+      vars.TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED != '1'
+    environment: travnr-cron-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - name: Read exact existing Cron jobs and probe stored authentication via GitHub GET only
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TRAVNR_CRON_ACCOUNT_KEY: ${{ secrets.TRAVNR_CRON_ACCOUNT_KEY }}
+          TRAVNR_AUTH_DIAG_PREVIOUS_SHA: ${{ github.event.before }}
+          TRAVNR_RELAY_MODE: ${{ vars.TRAVNR_RELAY_MODE }}
+          TRAVNR_RELAY_PRIMARY_ENABLED: ${{ vars.TRAVNR_RELAY_PRIMARY_ENABLED }}
+          TRAVNR_RELAY_ROLLING_ENABLED: ${{ vars.TRAVNR_RELAY_ROLLING_ENABLED }}
+          TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED: ${{ vars.TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED }}
+          TRAVNR_TARGET_ACTIONS_TOKEN: ''
+          TRAVNR_CRON_RELAY_TOKEN: ''
+          DATABASE_URL: ''
+          AERODATABOX_API_KEY: ''
+          RAPIDAPI_KEY: ''
+        run: node cron-auth-diagnostic.mjs
