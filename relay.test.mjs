@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {runPulse,rootInputs,cronJobSpec,readPrimaryVerifyLog,verifyPrimaryBootstrapReceipt,provesNoTargetStep,RELAY,TARGET,PILOT,PRIMARY,ROLLING} from "./relay.mjs";
+import {runPulse,rootInputs,cronJobSpec,readPrimaryVerifyLog,verifyPrimaryBootstrapReceipt,provesNoTargetStep,directTargetDisposition,RELAY,TARGET,PILOT,PRIMARY,ROLLING,DIRECT,DIRECT_TITLE,DIRECT_CONFIRM,DIRECT_VERIFY_TITLE,DIRECT_VERIFY_CONFIRM} from "./relay.mjs";
 const NOW=Date.parse("2026-11-18T06:00:00.000Z"),SHA="a".repeat(40),LOCAL="b".repeat(40);
 const tok="github_pat_"+ "x".repeat(30),root="https://api.github.com/repos/";
 const wrap=(data,status=200)=>({status,ok:status===200,json:async()=>data});
@@ -10,12 +10,12 @@ const bootJob={id:1202,name:"primary-fids-expiry",run_id:202,head_sha:SHA,run_at
 const bootStatus={status:"PRIMARY_FIDS_VERIFY_ONLY_NO_WRITES",reviewedMainSha:SHA,distinctDbActorsVerified:true,privateCommissionState:"GRANTED",providerCalls:0,databaseWrites:0,objectDeletions:0,phase6PaidGo:false,backupOrPitrVerified:false,completeRetentionDeploymentVerified:false,before:{schema:"v39.phase5.primary-fids-expiry-status.v1",observedAtUtc:new Date(NOW-19*60000).toISOString(),liveOriginals:0,eligibleOriginals:0,hardDueOriginals:0,eligibleNextHour:0,hardDueNextHour:0,unboundLiveOriginals:0,markedExpiredPayloadPresent:0,unlinkedUnexpiredPopulation:0,unexpiredPopulationWithoutLiveOriginal:0,deletionStopUnresolved:false,providerCalls:0,databaseWrites:0,phase6PaidGo:false,backupOrPitrVerified:false,completeRetentionDeploymentVerified:false}};
 function f(mode,fault=""){
  let posts=0,body;const events=[],env={GITHUB_ACTIONS:"true",GITHUB_REPOSITORY:RELAY,GITHUB_REF:"refs/heads/main",GITHUB_EVENT_NAME:"workflow_dispatch",GITHUB_RUN_ATTEMPT:"1",GITHUB_RUN_ID:"100",GITHUB_SHA:LOCAL,GITHUB_TOKEN:tok,TRAVNR_RELAY_MODE:mode,TRAVNR_TARGET_ACTIONS_TOKEN:tok,TRAVNR_APPROVED_TARGET_MAIN_SHA:SHA,TRAVNR_RELAY_MODE_SINCE_UTC:new Date(NOW-3600000).toISOString(),TRAVNR_ROLLING_POLICY_FROM_UTC:new Date(NOW-600000).toISOString(),TRAVNR_ROLLING_POLICY_UNTIL_UTC:new Date(NOW+6*3600000).toISOString(),TRAVNR_ROLLING_FOUR_APPROVED:"1"};
- const wf=mode==="PILOT"?PILOT:mode==="PRIMARY_BACKSTOP"?PRIMARY:ROLLING;
+ const wf=mode==="PILOT"?PILOT:mode==="PRIMARY_BACKSTOP"?PRIMARY:fault.startsWith("direct")?DIRECT:ROLLING;
  const fetcher=async(url,init)=>{
   if(init.method==="POST"){
    posts++;body=JSON.parse(init.body);
    assert.equal(url,root+TARGET+"/actions/workflows/"+wf+"/dispatches");
-   if(fault==="ack")return wrap({},503);
+   if(fault==="ack"||fault==="directAck")return wrap({},503);
    return wrap({workflow_run_id:201,run_url:root+TARGET+"/actions/runs/201",html_url:"https://github.com/"+TARGET+"/actions/runs/201"});
   }
   assert.equal(init.method,"GET");
@@ -39,7 +39,29 @@ function f(mode,fault=""){
    assert.equal(init.redirect,"error");assert.equal(init.headers,undefined);
    return new Response("timestamp "+JSON.stringify(fault==="notZero"?{...bootStatus,before:{...bootStatus.before,hardDueOriginals:1}}:bootStatus),{status:200});
   }
-  if(url===root+TARGET+"/actions/runs/201")return wrap(fault==="targetFailed"?{...row(201,wf),conclusion:"failure"}:row(201,wf,SHA,"queued"));
+  if(url===root+TARGET+"/actions/runs/201")return wrap(fault==="targetFailed"?{...row(201,wf),conclusion:"failure"}:{...row(201,wf,SHA,"queued"),...(wf===DIRECT?{display_title:env.TRAVNR_RELAY_ROLLING_ROUTE==="DIRECT_VERIFY"?DIRECT_VERIFY_TITLE:DIRECT_TITLE}:{})});
+  if(wf===DIRECT&&url.includes("/actions/workflows/"+ROLLING+"/runs?"))
+   return wrap({total_count:fault==="directOldActive"&&url.includes("status=queued")?1:0,workflow_runs:fault==="directOldActive"&&url.includes("status=queued")?[row(301,ROLLING,SHA,"queued")]:[]});
+  if(wf===DIRECT&&url.includes("/actions/workflows/"+DIRECT+"/runs?")&&url.includes("&created=")){
+   const q=new URL(url),status=q.searchParams.get("status");
+   if(fault==="directPriorFailure"&&status==="failure")return wrap({total_count:1,workflow_runs:[{...row(113,DIRECT),conclusion:"failure",display_title:DIRECT_TITLE}]});
+   if(["directRecent","directOld","directMissingMarker","directSafeHold","directCarried"].includes(fault)&&status==="success"){
+    const created=fault==="directRecent"?NOW-3*60000:NOW-15*60000;
+    return wrap({total_count:1,workflow_runs:[{...row(113,DIRECT),created_at:new Date(created).toISOString(),display_title:env.TRAVNR_RELAY_ROLLING_ROUTE==="DIRECT_VERIFY"?DIRECT_VERIFY_TITLE:DIRECT_TITLE}]});
+   }
+   return wrap({total_count:0,workflow_runs:[]});
+  }
+  if(wf===DIRECT&&url.includes("/actions/runs/113/jobs")){
+   const mk=(name,conclusion="success")=>({name,status:"completed",conclusion});
+   const j={id:511,name:"direct-protected-recovery-tick",run_id:113,head_sha:SHA,run_attempt:1,status:"completed",conclusion:"success",
+    steps:[mk("Execute one direct recovery wave and reconcile exact parent ACKs"),mk("Preserve direct terminal operational receipt"),
+     mk("Direct outcome TERMINAL_PARENT_ACKS_RECONCILED",["directSafeHold","directCarried"].includes(fault)?"skipped":"success"),mk("Direct outcome PREFLIGHT_HOLD_NO_POST",fault==="directSafeHold"?"success":"skipped"),mk("Direct outcome KNOWN_ACTIVE_PARENT_ACKS_CARRIED",fault==="directCarried"?"success":"skipped")]};
+   if(fault==="directMissingMarker")j.steps.pop();
+   
+   if(env.TRAVNR_RELAY_ROLLING_ROUTE==="DIRECT_VERIFY"){j.name="direct-readonly-verify";j.steps=[mk("Verify exact direct wake and existing workflow metadata NO POST")];}
+   return wrap({total_count:3,jobs:[j,{...j,id:512,name:"offline-direct-recovery",conclusion:"skipped",steps:[]},
+    {...j,id:513,name:env.TRAVNR_RELAY_ROLLING_ROUTE==="DIRECT_VERIFY"?"direct-protected-recovery-tick":"direct-readonly-verify",conclusion:"skipped",steps:[]}]});
+  }
   if(url.includes("/actions/runs/112/jobs"))return wrap({total_count:2,jobs:[{id:501,name:"one-protected-bounded-session",run_id:112,head_sha:SHA,run_attempt:1,status:"completed",conclusion:fault==="skip"?"skipped":"success",steps:fault==="skip"?[]:[{name:"Execute one protected rolling session"}]},{id:502,name:"offline-bounded-session-reconciliation",run_id:112,head_sha:SHA,run_attempt:1,status:"completed",conclusion:"skipped",steps:[]}]});
   if(url.includes("/actions/runs/111/jobs"))return wrap({total_count:1,jobs:[{name:"primary-fids-expiry",run_id:111,head_sha:SHA,run_attempt:1,status:"completed",conclusion:"success",completed_at:new Date(NOW-(fault==="recent"?5:40)*60000).toISOString(),steps:[{name:"Verify exact main and execute only bounded primary FIDS expiry",status:"completed",conclusion:"success"}]}]});
   if(url.includes("&status="))return wrap({total_count:fault==="active"?1:0,workflow_runs:fault==="active"?[row(301,wf,SHA,"queued")]:[]});
@@ -120,4 +142,93 @@ test("each shadow recovery clock is secret-free and touches only its own run met
   const a=await runPulse(x.env,x.opts);assert.equal(a.status,"EXTERNAL_RECOVERY_LANE_SHADOW_OBSERVED_NO_TARGET_DISPATCH");assert.equal(a.mode,lane);assert.equal(a.relayDispatches,0);assert.equal(reads,1);
   await assert.rejects(runPulse({...x.env,TRAVNR_TARGET_ACTIONS_TOKEN:tok},x.opts),/SCOPE/);
  }
+});
+
+test("transient preflight GET failures recover without retrying a target POST",async()=>{
+ for(const fault of [502,503,504,"transport","timeout",429]){
+  const x=multi("PRIMARY_BACKSTOP");let failed=0;const get=x.opts.fetcher;
+  x.opts.fetcher=async(url,init)=>{
+   if(init.method==="GET"&&url===root+TARGET+"/git/ref/heads/main"&&failed<2){
+    failed++;
+    if(fault==="transport")throw new TypeError("synthetic transport failure");
+    if(fault==="timeout")throw new DOMException("synthetic timeout","TimeoutError");
+    return {...wrap({},fault),headers:new Headers(fault===429?{"retry-after":"1"}:{})};
+   }
+   return get(url,init);
+  };
+  assert.equal((await runPulse(x.env,x.opts)).targetRunId,201);
+  assert.equal(failed,2);assert.equal(x.posts(),1);
+  assert.equal(x.events.filter(e=>e.status==="EXTERNAL_WAKE_PREFLIGHT_GET_RETRY_NO_POST").length,2);
+ }
+});
+test("exhausted transient GET never dispatches and has a bounded attempt count",async()=>{
+ const x=multi("PRIMARY_BACKSTOP");let n=0;const get=x.opts.fetcher;
+ x.opts.fetcher=async(url,init)=>init.method==="GET"&&url===root+TARGET+"/git/ref/heads/main"?(n++,wrap({},503)):get(url,init);
+ const r=await runPulse(x.env,x.opts);
+ assert.equal(r.reason,"HOLD_EXTERNAL_CLOCK_GET_HTTP_503");assert.equal(n,3);assert.equal(x.posts(),0);
+});
+test("hard authorization and long or unspecified rate limits do not retry",async()=>{
+ for(const [status,retry] of [[401,null],[403,null],[404,null],[429,null],[429,"60"],[503,"60"]]){
+  const x=multi("PRIMARY_BACKSTOP");let n=0;const get=x.opts.fetcher;
+  x.opts.fetcher=async(url,init)=>init.method==="GET"&&url===root+TARGET+"/git/ref/heads/main"?(n++,{...wrap({},status),headers:new Headers(retry==null?{}:{"retry-after":retry})}):get(url,init);
+  const r=await runPulse(x.env,x.opts);
+  assert.equal(r.reason,"HOLD_EXTERNAL_CLOCK_GET_HTTP_"+status);assert.equal(n,1);assert.equal(x.posts(),0);
+ }
+});
+test("readback after a single acknowledged POST retains original four GET limit",async()=>{
+ const x=multi("PRIMARY_BACKSTOP");let n=0;const get=x.opts.fetcher;
+ x.opts.fetcher=async(url,init)=>init.method==="GET"&&url===root+TARGET+"/actions/runs/201"?(n++,wrap({},503)):get(url,init);
+ await assert.rejects(runPulse(x.env,x.opts),/NO_BLIND_REPLAY/);
+ assert.equal(n,4);assert.equal(x.posts(),1);
+ assert.equal(x.events.filter(e=>e.status==="EXTERNAL_WAKE_PREFLIGHT_GET_RETRY_NO_POST").length,0);
+});
+test("retry delay cannot move preflight beyond the existing two-minute admission bound",async()=>{
+ const x=multi("PRIMARY_BACKSTOP");let clock=NOW,n=0;const get=x.opts.fetcher;
+ x.opts.now=()=>clock;
+ x.opts.fetcher=async(url,init)=>{
+  if(init.method==="GET"&&url===root+TARGET+"/git/ref/heads/main"){
+   n++;clock=NOW+119000;return wrap({},503);
+  }
+  return get(url,init);
+ };
+ const r=await runPulse(x.env,x.opts);assert.equal(r.reason,"HOLD_EXTERNAL_CLOCK_GET_HTTP_503");assert.equal(n,1);assert.equal(x.posts(),0);
+});
+
+function directFixture(fault="directFresh"){
+ const x=multi("ROLLING_ROOT",fault);
+ Object.assign(x.env,{TRAVNR_RELAY_ROLLING_ROUTE:"DIRECT_TICK",TRAVNR_RELAY_DIRECT_TICK_APPROVED:"1",TRAVNR_RELAY_ROLLING_SINCE_UTC:new Date(NOW-20*60000).toISOString(),
+  TRAVNR_ROLLING_POLICY_FROM_UTC:new Date(NOW-60*60000).toISOString()});
+ return x;
+}
+test("direct route is one fixed target POST, independent of V0102 or root scope",async()=>{
+ for(const fault of ["directFresh","directOld","directSafeHold","directCarried"]){
+  const x=directFixture(fault);const r=await runPulse(x.env,x.opts);
+  assert.equal(r.targetWorkflow,DIRECT);assert.equal(r.targetRunId,201);assert.equal(x.posts(),1);
+  assert.deepEqual(x.body().inputs,{confirm:DIRECT_CONFIRM,approved_main_sha:SHA});
+ }
+});
+test("direct route refuses absent approval, prior root failure, recent or malformed prior tick and old active controller",async()=>{
+ for(const fault of ["directRecent","directMissingMarker","directOldActive","directPriorFailure"]){
+  const x=directFixture(fault);const r=await runPulse(x.env,x.opts);assert.equal(x.posts(),0);assert(r.status!== "TARGET_ACK_AND_RUN_IDENTITY_VERIFIED_NOT_COLLECTION_PROOF");
+ }
+ const x=directFixture();delete x.env.TRAVNR_RELAY_DIRECT_TICK_APPROVED;
+ assert.match((await runPulse(x.env,x.opts)).reason,/DIRECT_TICK_NOT_SEPARATELY_APPROVED/);assert.equal(x.posts(),0);
+ const y=directFixture();y.env.TRAVNR_ROLLING_POLICY_UNTIL_UTC=new Date(NOW+24*60000).toISOString();
+ assert.equal((await runPulse(y.env,y.opts)).status,"DEFER_OUTSIDE_OR_LATE_POLICY_WINDOW");assert.equal(y.posts(),0);
+});
+test("direct route unknown ACK never falls back to rolling root or repeats",async()=>{
+ const x=directFixture("directAck");await assert.rejects(runPulse(x.env,x.opts),/NO_BLIND_REPLAY/);assert.equal(x.posts(),1);
+});
+
+test("bounded direct VERIFY reuses one wake without paid policy and cannot set tick approval",async()=>{
+ for(const fault of ["directFresh","directOld"]){
+  const x=directFixture(fault);Object.assign(x.env,{TRAVNR_RELAY_ROLLING_ROUTE:"DIRECT_VERIFY",TRAVNR_RELAY_DIRECT_TICK_APPROVED:"0"});
+  delete x.env.TRAVNR_ROLLING_POLICY_FROM_UTC;delete x.env.TRAVNR_ROLLING_POLICY_UNTIL_UTC;
+  const out=await runPulse(x.env,x.opts);assert.equal(out.targetWorkflow,DIRECT);assert.equal(x.posts(),1);
+  assert.deepEqual(x.body().inputs,{confirm:DIRECT_VERIFY_CONFIRM,approved_main_sha:SHA});
+ }
+ const y=directFixture();y.env.TRAVNR_RELAY_ROLLING_ROUTE="DIRECT_VERIFY";
+ assert.match((await runPulse(y.env,y.opts)).reason,/DIRECT_TICK_NOT_SEPARATELY_APPROVED/);assert.equal(y.posts(),0);
+ const z=directFixture();Object.assign(z.env,{TRAVNR_RELAY_ROLLING_ROUTE:"DIRECT_VERIFY",TRAVNR_RELAY_DIRECT_TICK_APPROVED:"0",TRAVNR_RELAY_ROLLING_SINCE_UTC:new Date(NOW-116*60000).toISOString()});
+ assert.equal((await runPulse(z.env,z.opts)).status,"DEFER_OUTSIDE_OR_LATE_POLICY_WINDOW");assert.equal(z.posts(),0);
 });

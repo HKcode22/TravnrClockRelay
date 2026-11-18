@@ -5,6 +5,11 @@ export const RELAY="HKcode22/TravnrClockRelay",TARGET="HKcode22/ReplitTranvr";
 export const PILOT="phase5-autonomous-clock-canary-no-provider.yml";
 export const PRIMARY="phase5-primary-fids-expiry-no-provider.yml";
 export const ROLLING="phase6-rolling-controller-bounded-session.yml";
+export const DIRECT="phase6-direct-recovery-tick.yml";
+export const DIRECT_TITLE="P6 DIRECT RECOVERY TICK";
+export const DIRECT_VERIFY_TITLE="P6 DIRECT RECOVERY VERIFY";
+export const DIRECT_VERIFY_CONFIRM="VERIFY_DIRECT_RECOVERY_CLOCK_NO_PROVIDER_NO_DB_NO_DISPATCH";
+export const DIRECT_CONFIRM="RUN_ONE_REVIEWED_DIRECT_RECOVERY_TICK_AFTER_SEPARATE_PHASE6_GO";
 const ROOT="https://api.github.com/repos/",SELF="external-clock.yml",MIN=60000;
 const HOLD=s=>{throw Error("HOLD_EXTERNAL_CLOCK_"+s);}, id=x=>Number.isSafeInteger(x)&&x>0;
 const sha=x=>typeof x==="string"&&/^[a-f0-9]{40}$/.test(x);
@@ -100,6 +105,25 @@ export function provesNoTargetStep(run,jobs){
  return step.length===1&&step[0].status==="completed"&&step[0].conclusion==="skipped"&&
    (step[0].started_at==null||step[0].started_at===step[0].completed_at);
 }
+
+
+export function directTargetDisposition(run,jobs,verify=false){
+ if(!Array.isArray(jobs)||jobs.length!==3||new Set(jobs.map(j=>j.id)).size!==3||
+    !jobs.every(j=>id(j.id)&&j.run_id===run.id&&j.head_sha===run.head_sha&&j.run_attempt===1&&j.status==="completed"))return null;
+ const name=verify?"direct-readonly-verify":"direct-protected-recovery-tick";
+ if(!["offline-direct-recovery",verify?"direct-protected-recovery-tick":"direct-readonly-verify"].every(n=>
+    jobs.filter(j=>j.name===n&&j.conclusion==="skipped"&&(j.steps==null||Array.isArray(j.steps)&&j.steps.length===0)).length===1))return null;
+ const p=jobs.find(j=>j.name===name);
+ if(!p||p.conclusion!=="success"||!Array.isArray(p.steps))return null;
+ if(verify)return p.steps.filter(s=>s.name==="Verify exact direct wake and existing workflow metadata NO POST"&&s.status==="completed"&&s.conclusion==="success").length===1?"VERIFY_ONLY":null;
+ if(
+    !["Execute one direct recovery wave and reconcile exact parent ACKs","Preserve direct terminal operational receipt"].every(name=>
+      p.steps.filter(s=>s.name===name&&s.status==="completed"&&s.conclusion==="success").length===1))return null;
+ const marks=["Direct outcome TERMINAL_PARENT_ACKS_RECONCILED","Direct outcome PREFLIGHT_HOLD_NO_POST","Direct outcome KNOWN_ACTIVE_PARENT_ACKS_CARRIED"].map(name=>p.steps.filter(s=>s.name===name));
+ if(marks.some(x=>x.length!==1||x[0].status!=="completed"||!["success","skipped"].includes(x[0].conclusion))||
+    marks.filter(x=>x[0].conclusion==="success").length!==1)return null;
+ return ["TERMINAL","PREFLIGHT_HOLD","CARRIED"][marks.findIndex(x=>x[0].conclusion==="success")];
+}
 export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep=ms=>new Promise(r=>setTimeout(r,ms))}={}){
  const configured=env.TRAVNR_RELAY_MODE||"CLOCK_ONLY", lane=env.TRAVNR_RELAY_LANE||"CLOCK_ONLY",
   multi=configured==="MULTI_LANE", shadow=configured==="SHADOW_PAIR", mode=multi||shadow?lane:configured, start=now(),runId=Number(env.GITHUB_RUN_ID);
@@ -112,11 +136,29 @@ export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep
  let reads=0,attempted=false;
  const auth=token=>({Accept:"application/vnd.github+json",Authorization:"Bearer "+token,"X-GitHub-Api-Version":"2022-11-28"});
  const get=async(repo,path)=>{
-  if(++reads>40||now()-start>180000||!path.startsWith("/")||path.startsWith("//"))HOLD("READ_BOUND");
   const token=repo===RELAY?env.GITHUB_TOKEN:env.TRAVNR_TARGET_ACTIONS_TOKEN;
-  const res=await fetcher(ROOT+repo+path,{method:"GET",headers:auth(token),redirect:"error",signal:AbortSignal.timeout(10000)});
-  if(!res.ok)HOLD("GET_HTTP_"+res.status);
-  return res.json();
+  // Only bounded read-only preflight retries; the existing independent ACK
+  // readback loop is unchanged. Every physical GET consumes the same budget.
+  for(let i=0;;i++){
+   if(++reads>40||now()-start>180000||!path.startsWith("/")||path.startsWith("//"))HOLD("READ_BOUND");
+   let res,transport=false;
+   try{
+    res=await fetcher(ROOT+repo+path,{method:"GET",headers:auth(token),redirect:"error",signal:AbortSignal.timeout(10000)});
+   }catch(e){
+    if(!(e instanceof TypeError)&&!["TimeoutError","AbortError"].includes(e?.name))throw e;
+    transport=true;
+   }
+   if(res?.ok)return res.json();
+   const status=transport?"TRANSPORT":"HTTP_"+res.status;
+   const ra=res?.headers?.get?.("retry-after");
+   // A 429 without an explicitly short retry-after is not retried. Longer
+   // provider advice is respected by deferring to the next scheduler pulse.
+   const wait=ra==null?1000*(i+1):/^\d+$/.test(ra)&&Number(ra)<=3?Math.max(1000,Number(ra)*1000):null;
+   const transient=transport||[502,503,504].includes(res?.status)||res?.status===429&&ra!=null;
+   if(attempted||i>=2||!transient||wait===null||reads>=40||now()-start+wait+10000>120000)HOLD("GET_"+status);
+   emit({status:"EXTERNAL_WAKE_PREFLIGHT_GET_RETRY_NO_POST",mode,relayRunId:runId,attempt:i+1,reason:status,waitMs:wait});
+   await sleep(wait);
+  }
  };
  const complete=(x,key)=>{if(!Number.isSafeInteger(x?.total_count)||x.total_count<0||x.total_count>100||!Array.isArray(x[key])||x[key].length!==x.total_count)HOLD("HISTORY_INCOMPLETE");return x[key];};
  const exact=(r,wf,repo)=>{if(!id(r?.id)||r.path!==".github/workflows/"+wf||r.head_branch!=="main"||!sha(r.head_sha)||
@@ -168,15 +210,60 @@ export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep
     }
    }
   }
+
+  const rollingRoute=env.TRAVNR_RELAY_ROLLING_ROUTE||"DURABLE_ROOT";
+
+  if(mode==="ROLLING_ROOT"&&!["DURABLE_ROOT","DIRECT_TICK","DIRECT_VERIFY"].includes(rollingRoute))HOLD("ROLLING_ROUTE");
+  const direct=mode==="ROLLING_ROOT"&&["DIRECT_TICK","DIRECT_VERIFY"].includes(rollingRoute),verify=direct&&rollingRoute==="DIRECT_VERIFY";
+  if(direct&&(!multi||(verify?env.TRAVNR_RELAY_DIRECT_TICK_APPROVED==="1":env.TRAVNR_RELAY_DIRECT_TICK_APPROVED!=="1")))HOLD("DIRECT_TICK_NOT_SEPARATELY_APPROVED");
+  const expectedDirectTitle=verify?DIRECT_VERIFY_TITLE:DIRECT_TITLE;
   await main();
-  const wf=mode==="PILOT"?PILOT:mode==="PRIMARY_BACKSTOP"?PRIMARY:ROLLING;
+  const wf=mode==="PILOT"?PILOT:mode==="PRIMARY_BACKSTOP"?PRIMARY:direct?DIRECT:ROLLING;
   const q="/actions/workflows/"+wf+"/runs?branch=main&per_page=100";
   for(const state of active){
    const xs=complete(await get(TARGET,q+"&status="+state),"workflow_runs").map(r=>exact(r,wf,TARGET));
    if(xs.some(x=>x.status!==state))HOLD("ACTIVE_HISTORY_CHANGED");
    if(xs.length)return result("DEFER_TARGET_ALREADY_ACTIVE",clock);
   }
-  let inputs,rootScope=null;
+
+  let inputs,rootScope=null,directUntil=null;
+  if(direct){
+   // Same single external wake and single POST; no dynamic root/custody
+   // mutation, no new Cron lease and no production secrets at the relay.
+
+   // Read-only commissioning uses at most two hours from its reviewed
+   // mode start, without pretending a signed paid calendar already exists.
+   const a=verify?since:stamp(env.TRAVNR_ROLLING_POLICY_FROM_UTC),z=verify?since+120*MIN:stamp(env.TRAVNR_ROLLING_POLICY_UNTIL_UTC);
+   if(!verify&&(a%1000||z%1000||z<=a||z-a>60*24*3600000||since<a||since>=z))HOLD("DIRECT_POLICY_SCOPE");
+   if(now()<a||z-now()<(verify?5:25)*MIN)return result("DEFER_OUTSIDE_OR_LATE_POLICY_WINDOW",clock);
+   directUntil=z;
+   // Never launch direct recovery alongside an old controller. Native
+   // worker schedules remain separate and use their existing locks.
+   for(const state of active){
+    const rows=complete(await get(TARGET,"/actions/workflows/"+ROLLING+"/runs?branch=main&per_page=100&status="+state),"workflow_runs").map(x=>exact(x,ROLLING,TARGET));
+    if(rows.some(x=>x.status!==state))HOLD("DIRECT_ACTIVE_HISTORY");
+    if(rows.length)return result("DEFER_TARGET_ALREADY_ACTIVE",clock);
+   }
+   const history="/actions/workflows/"+DIRECT+"/runs?branch=main&per_page=1&created="+encodeURIComponent(">="+iso(since));
+   const counts=x=>{
+    if(!Number.isSafeInteger(x?.total_count)||x.total_count<0||!Array.isArray(x.workflow_runs)||x.workflow_runs.length!==Math.min(1,x.total_count))HOLD("DIRECT_HISTORY");
+    return x.total_count;
+   };
+   for(const status of ["failure","cancelled","timed_out","action_required","stale","neutral","skipped"]){
+    const p=await get(TARGET,history+"&status="+status);
+    if(counts(p)>0)return result("DEFER_DIRECT_PRIOR_ATTEMPT_REVIEW_NO_REPLAY",clock);
+   }
+   const p=await get(TARGET,history+"&status=success");
+   if(counts(p)>0){
+    const last=exact(p.workflow_runs[0],DIRECT,TARGET);
+    if(last.head_sha!==env.TRAVNR_APPROVED_TARGET_MAIN_SHA||last.event!=="workflow_dispatch"||last.display_title!==expectedDirectTitle||
+       last.status!=="completed"||last.conclusion!=="success"||Date.parse(last.created_at)<Math.floor(since/1000)*1000||Date.parse(last.created_at)>now())HOLD("DIRECT_PREDECESSOR_IDENTITY");
+    const jobs=complete(await get(TARGET,"/actions/runs/"+last.id+"/jobs?filter=latest&per_page=100"),"jobs");
+    if(!directTargetDisposition(last,jobs,verify))HOLD("DIRECT_PREDECESSOR_JOB");
+    // Creation-time cooldown, not a claim of actual flight capture.
+    if(now()-Date.parse(last.created_at)<8*MIN)return result("DEFER_RECENT_DIRECT_TICK_NOT_COLLECTION_PROOF",clock);
+   }
+  }
   if(mode==="PILOT"){
    // Exactly one existing nonpaid canary, only if not already running.
    inputs={mode:"OBSERVE"};
@@ -214,6 +301,9 @@ export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep
    if(now()-Date.parse(good[0].completed_at)<20*MIN)return result("DEFER_RECENT_PRIMARY_STEP_NOT_DELETION_PROOF",clock);
    }
    inputs={confirm:"APPLY_REVIEWED_PRIMARY_FIDS_BACKSTOP_NO_PRIVATE_MUTATION",approved_main_sha:env.TRAVNR_APPROVED_TARGET_MAIN_SHA};
+
+  }else if(direct){
+   inputs={confirm:verify?DIRECT_VERIFY_CONFIRM:DIRECT_CONFIRM,approved_main_sha:env.TRAVNR_APPROVED_TARGET_MAIN_SHA};
   }else{
    // Reuse existing manual dynamic root admission; do not simulate schedule
    // event or bypass the actual signed DB-clock authorization/custody.
@@ -247,7 +337,9 @@ export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep
   }
   await main();
   if(now()-start>120000)HOLD("STALE_PREFLIGHT");
+
   if(rootScope&&now()+15*MIN>=Date.parse(inputs.window_deadline_utc))HOLD("ROOT_TOO_LATE");
+  if(direct&&directUntil-now()<(verify?5:25)*MIN)HOLD("DIRECT_TOO_LATE");
   emit({status:"EXTERNAL_WAKE_TARGET_ATTEMPT_NO_REPLAY",mode,workflow:wf,relayRunId:runId,attemptUtc:iso(now())});
   attempted=true;
   const a=await fetcher(ROOT+TARGET+"/actions/workflows/"+wf+"/dispatches",{method:"POST",headers:{...auth(env.TRAVNR_TARGET_ACTIONS_TOKEN),"Content-Type":"application/json"},redirect:"error",signal:AbortSignal.timeout(10000),body:JSON.stringify({ref:"main",return_run_details:true,inputs})});
@@ -259,7 +351,8 @@ export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep
   let live;
   for(let i=0;i<4;i++){try{live=await get(TARGET,"/actions/runs/"+rid);break;}catch(e){if(i===3)throw e;await sleep(3000);}}
   exact(live,wf,TARGET);
-  if(live.id!==rid||live.head_sha!==env.TRAVNR_APPROVED_TARGET_MAIN_SHA||live.event!=="workflow_dispatch")HOLD("ACK_READBACK_DRIFT");
+
+  if(live.id!==rid||live.head_sha!==env.TRAVNR_APPROVED_TARGET_MAIN_SHA||live.event!=="workflow_dispatch"||direct&&live.display_title!==expectedDirectTitle)HOLD("ACK_READBACK_DRIFT");
   if(live.status==="completed"&&live.conclusion!=="success")HOLD("ACK_TARGET_TERMINAL_FAILURE_REVIEW");
   return result("TARGET_ACK_AND_RUN_IDENTITY_VERIFIED_NOT_COLLECTION_PROOF",{...clock,targetRunId:rid,targetStatus:live.status,targetWorkflow:wf,relayDispatches:1});
  }catch(e){
