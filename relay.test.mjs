@@ -232,3 +232,34 @@ test("bounded direct VERIFY reuses one wake without paid policy and cannot set t
  const z=directFixture();Object.assign(z.env,{TRAVNR_RELAY_ROLLING_ROUTE:"DIRECT_VERIFY",TRAVNR_RELAY_DIRECT_TICK_APPROVED:"0",TRAVNR_RELAY_ROLLING_SINCE_UTC:new Date(NOW-116*60000).toISOString()});
  assert.equal((await runPulse(z.env,z.opts)).status,"DEFER_OUTSIDE_OR_LATE_POLICY_WINDOW");assert.equal(z.posts(),0);
 });
+
+// GitHub can expose the newly created workflow run before evaluating run-name.
+// The live Nov18 verify dispatch returned an ACK, then failed readback, while
+// its independently read target later succeeded on the expected title/commit.
+test("direct acknowledged active run permits delayed title evaluation using only same-ID GET",async()=>{
+ for(const route of ["DIRECT_VERIFY","DIRECT_TICK"]){
+  const x=directFixture();if(route==="DIRECT_VERIFY")Object.assign(x.env,{TRAVNR_RELAY_ROLLING_ROUTE:route,TRAVNR_RELAY_DIRECT_TICK_APPROVED:"0"});
+  const get=x.opts.fetcher;let n=0;
+  x.opts.fetcher=async(url,init)=>{if(init.method==="GET"&&url===root+TARGET+"/actions/runs/201"){
+   if(++n<=2)return wrap({...row(201,DIRECT,SHA,"queued"),display_title:"Phase6 direct existing-worker recovery (STOP default)"});
+  }return get(url,init);};
+  assert.equal((await runPulse(x.env,x.opts)).targetRunId,201);assert.equal(n,3);assert.equal(x.posts(),1);
+  assert.equal(x.events.filter(e=>e.status==="EXTERNAL_WAKE_ACK_ACTIVE_TITLE_PENDING_GET_ONLY").length,2);
+ }
+});
+test("direct wrong active title exhaustion, terminal wrong title and immutable drift never replay or pass",async()=>{
+ for(const [fault,expected,reads] of [["active","ACK_READBACK_TITLE_DRIFT",4],["terminal","ACK_READBACK_TITLE_DRIFT",1],["sha","ACK_READBACK_IMMUTABLE_DRIFT",1],["id","ACK_READBACK_IMMUTABLE_DRIFT",1],["event","ACK_READBACK_IMMUTABLE_DRIFT",1]]){
+  const x=directFixture();let n=0;const get=x.opts.fetcher;
+  x.opts.fetcher=async(url,init)=>{if(init.method==="GET"&&url===root+TARGET+"/actions/runs/201"){
+   n++;return wrap({...row(fault==="id"?999:201,DIRECT,fault==="sha"?LOCAL:SHA,fault==="terminal"?"completed":"queued"),event:fault==="event"?"schedule":"workflow_dispatch",display_title:fault==="sha"||fault==="id"||fault==="event"?DIRECT_TITLE:"wrong"});
+  }return get(url,init);};
+  await assert.rejects(runPulse(x.env,x.opts),new RegExp(expected+"_NO_BLIND_REPLAY"));assert.equal(n,reads);assert.equal(x.posts(),1);
+ }
+});
+test("a pending direct title followed by terminal target failure remains quarantined",async()=>{
+ const x=directFixture();const get=x.opts.fetcher;let n=0;
+ x.opts.fetcher=async(url,init)=>{if(init.method==="GET"&&url===root+TARGET+"/actions/runs/201"){
+  n++;return wrap(n===1?{...row(201,DIRECT,SHA,"queued"),display_title:"pending"}:{...row(201,DIRECT),display_title:DIRECT_TITLE,conclusion:"failure"});
+ }return get(url,init);};
+ await assert.rejects(runPulse(x.env,x.opts),/ACK_TARGET_TERMINAL_FAILURE_REVIEW_NO_BLIND_REPLAY/);assert.equal(x.posts(),1);assert.equal(n,2);
+});
