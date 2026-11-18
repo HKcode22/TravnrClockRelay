@@ -286,8 +286,8 @@ export function auditLanes(layout){
 async function main(){
  const e=process.env,local=process.argv[2]==="--owner-audit-pilot",repaired=process.argv[2]==="--shadow-rekey",shadow=process.argv[2]==="--shadow-pair"||repaired,mode=local?"PILOT":shadow?"SHADOW":e.TRAVNR_CRON_AUDIT_MODE,shadowRecent=mode==="SHADOW_RECENT";
  if(local?e.GITHUB_ACTIONS==="true":e.GITHUB_ACTIONS!=="true"||e.GITHUB_REPOSITORY!==REPO||e.GITHUB_REF!=="refs/heads/main"||
-    !(shadow?["workflow_dispatch"]:["schedule","push"]).includes(e.GITHUB_EVENT_NAME)||e.GITHUB_RUN_ATTEMPT!=="1"||
-    (!shadow&&(e.GITHUB_EVENT_NAME==="schedule"?!["RECENT","SHADOW_RECENT"].includes(mode):mode!=="PILOT"||e.TRAVNR_CRON_PREVIOUS_RELAY_SHA!==PILOT.pin||Date.now()<time(PILOT.until)+120000))||
+    !(shadow?["workflow_dispatch"]:["schedule","workflow_dispatch","push"]).includes(e.GITHUB_EVENT_NAME)||e.GITHUB_RUN_ATTEMPT!=="1"||
+    (!shadow&&(["schedule","workflow_dispatch"].includes(e.GITHUB_EVENT_NAME)?!["RECENT","SHADOW_RECENT"].includes(mode):mode!=="PILOT"||e.TRAVNR_CRON_PREVIOUS_RELAY_SHA!==PILOT.pin||Date.now()<time(PILOT.until)+120000))||
     typeof e.GITHUB_TOKEN!=="string"||e.GITHUB_TOKEN.length<16)HOLD("RUNTIME_SCOPE");
  if(e.DATABASE_URL||e.RAPIDAPI_KEY||e.AERODATABOX_API_KEY||e.TRAVNR_TARGET_ACTIONS_TOKEN||e.NODE_TLS_REJECT_UNAUTHORIZED==="0"||
     typeof e.TRAVNR_CRON_ACCOUNT_KEY!=="string"||e.TRAVNR_CRON_ACCOUNT_KEY.length<16)HOLD("SECRET_SCOPE");

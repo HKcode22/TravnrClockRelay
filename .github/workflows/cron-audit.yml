@@ -1,5 +1,6 @@
 name: Managed cron clock audit (read-only)
 on:
+  workflow_dispatch:
   pull_request:
     branches: [main]
     paths: ['cron-audit.mjs', 'cron-audit.test.mjs', '.github/workflows/cron-audit.yml']
@@ -50,7 +51,7 @@ jobs:
       github.ref == 'refs/heads/main' && github.run_attempt == 1 &&
       (github.event_name == 'push' && github.event.before == '9cca29330405774520e0c7929f4916e24d9934e4' &&
        vars.TRAVNR_CRON_PILOT_AUDIT_AFTER_MERGE == '1' ||
-      (github.event_name == 'schedule' && (vars.TRAVNR_CRON_AUDIT_ENABLED == '1' || (vars.TRAVNR_RELAY_MODE == 'CLOCK_ONLY' && vars.TRAVNR_RELAY_PRIMARY_ENABLED != '1' && vars.TRAVNR_RELAY_ROLLING_ENABLED != '1' && vars.TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED != '1'))))
+      ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (vars.TRAVNR_CRON_AUDIT_ENABLED == '1' || (vars.TRAVNR_RELAY_MODE == 'CLOCK_ONLY' && vars.TRAVNR_RELAY_PRIMARY_ENABLED != '1' && vars.TRAVNR_RELAY_ROLLING_ENABLED != '1' && vars.TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED != '1'))))
     environment: travnr-cron-audit
     runs-on: ubuntu-latest
     timeout-minutes: 6
@@ -63,7 +64,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           TRAVNR_CRON_ACCOUNT_KEY: ${{ secrets.TRAVNR_CRON_ACCOUNT_KEY }}
-          TRAVNR_CRON_AUDIT_MODE: ${{ github.event_name == 'schedule' && (vars.TRAVNR_RELAY_MODE == 'CLOCK_ONLY' && 'SHADOW_RECENT' || 'RECENT') || 'PILOT' }}
+          TRAVNR_CRON_AUDIT_MODE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (vars.TRAVNR_RELAY_MODE == 'CLOCK_ONLY' && 'SHADOW_RECENT' || 'RECENT') || 'PILOT' }}
           TRAVNR_RELAY_MODE: ${{ vars.TRAVNR_RELAY_MODE }}
           TRAVNR_RELAY_PRIMARY_ENABLED: ${{ vars.TRAVNR_RELAY_PRIMARY_ENABLED }}
           TRAVNR_RELAY_ROLLING_ENABLED: ${{ vars.TRAVNR_RELAY_ROLLING_ENABLED }}
