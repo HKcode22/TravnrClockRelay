@@ -347,13 +347,23 @@ export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep
   const b=await a.json(),rid=b?.workflow_run_id;
   if(!id(rid)||b.run_url!==ROOT+TARGET+"/actions/runs/"+rid||b.html_url!=="https://github.com/"+TARGET+"/actions/runs/"+rid)HOLD("UNKNOWN_ACK");
   emit({status:"EXTERNAL_WAKE_TARGET_ACK_NOT_EXECUTION_PROOF",mode,runId:rid,relayRunId:runId});
-  // Only GET retries after acknowledged run ID. No second POST.
+  // A newly acknowledged run can be visible before its evaluated display
+  // title. Four bounded GETs of the SAME acknowledged ID, never another POST.
+  // Immutable mismatches and terminal wrong titles remain hard failures.
   let live;
-  for(let i=0;i<4;i++){try{live=await get(TARGET,"/actions/runs/"+rid);break;}catch(e){if(i===3)throw e;await sleep(3000);}}
-  exact(live,wf,TARGET);
-
-  if(live.id!==rid||live.head_sha!==env.TRAVNR_APPROVED_TARGET_MAIN_SHA||live.event!=="workflow_dispatch"||direct&&live.display_title!==expectedDirectTitle)HOLD("ACK_READBACK_DRIFT");
-  if(live.status==="completed"&&live.conclusion!=="success")HOLD("ACK_TARGET_TERMINAL_FAILURE_REVIEW");
+  for(let i=0;i<4;i++){
+   try{live=await get(TARGET,"/actions/runs/"+rid);}
+   catch(e){if(i===3)throw e;await sleep(3000);continue;}
+   exact(live,wf,TARGET);
+   if(live.id!==rid||live.head_sha!==env.TRAVNR_APPROVED_TARGET_MAIN_SHA||live.event!=="workflow_dispatch")HOLD("ACK_READBACK_IMMUTABLE_DRIFT");
+   if(live.status==="completed"&&live.conclusion!=="success")HOLD("ACK_TARGET_TERMINAL_FAILURE_REVIEW");
+   if(direct&&live.display_title!==expectedDirectTitle){
+    if(i===3||live.status==="completed")HOLD("ACK_READBACK_TITLE_DRIFT");
+    emit({status:"EXTERNAL_WAKE_ACK_ACTIVE_TITLE_PENDING_GET_ONLY",mode,relayRunId:runId,targetRunId:rid,attempt:i+1});
+    await sleep(3000);continue;
+   }
+   break;
+  }
   return result("TARGET_ACK_AND_RUN_IDENTITY_VERIFIED_NOT_COLLECTION_PROOF",{...clock,targetRunId:rid,targetStatus:live.status,targetWorkflow:wf,relayDispatches:1});
  }catch(e){
   const m=/^HOLD_EXTERNAL_CLOCK_[A-Z0-9_]{1,80}$/.test(e?.message??"")?e.message:"HOLD_EXTERNAL_CLOCK_REDACTED";
