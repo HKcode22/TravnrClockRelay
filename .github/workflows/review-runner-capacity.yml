@@ -1,0 +1,92 @@
+name: One-shot 24-slot hosted runner allocation measurement
+on:
+  pull_request:
+    types: [opened]
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: nov18-hosted-capacity-once
+  cancel-in-progress: false
+jobs:
+  occupy:
+    if: >-
+      github.repository == 'HKcode22/TravnrClockRelay' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == 'HKcode22' &&
+      github.head_ref == 'review/nov18-actual-runner-capacity' &&
+      github.run_attempt == 1
+    name: runner-capacity-slot (${{ matrix.slot }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    strategy:
+      fail-fast: false
+      max-parallel: 24
+      matrix:
+        slot: ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24']
+    steps:
+      - name: Occupy lightweight runner for 90 seconds (no provider or DB)
+        env:
+          SLOT: ${{ matrix.slot }}
+        run: |
+          set -Eeuo pipefail
+          case "$SLOT" in 0[1-9]|1[0-9]|2[0-4]) ;; *) exit 2 ;; esac
+          printf 'CAPACITY_SLOT_READY=%s UTC=%s\n' "$SLOT" "$(date -u +%FT%T.%3NZ)"
+          sleep 90
+          printf 'CAPACITY_SLOT_DONE=%s UTC=%s\n' "$SLOT" "$(date -u +%FT%T.%3NZ)"
+  independent-metadata-report:
+    if: >-
+      always() && github.repository == 'HKcode22/TravnrClockRelay' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == 'HKcode22' &&
+      github.head_ref == 'review/nov18-actual-runner-capacity' &&
+      github.run_attempt == 1
+    needs: occupy
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      PR_HEAD: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Independently measure actual runner overlap from GitHub job metadata
+        run: |
+          node --input-type=module <<'NODE'
+          const repo="HKcode22/TravnrClockRelay",id=Number(process.env.GITHUB_RUN_ID),pin=process.env.PR_HEAD;
+          const root="https://api.github.com/repos/"+repo,headers={Authorization:"Bearer "+process.env.GITHUB_TOKEN,Accept:"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"};
+          const hold=s=>{throw Error("HOLD_CAPACITY_"+s)};
+          const time=s=>{const n=Date.parse(s);if(!Number.isFinite(n))hold("CLOCK");return n};
+          async function get(path){
+            const r=await fetch(root+path,{method:"GET",headers,redirect:"error",signal:AbortSignal.timeout(10000)});
+            if(!r.ok)hold("HTTP_"+r.status);return r.json();
+          }
+          function peak(rows){
+            const events=rows.flatMap(x=>[[x[0],1],[x[1],-1]]).sort((a,b)=>a[0]-b[0]||a[1]-b[1]);
+            let sum=0,max=0;for(const [t,d] of events){sum+=d;max=Math.max(max,sum)}return max;
+          }
+          async function go(){
+            if(process.env.GITHUB_REPOSITORY!==repo||process.env.GITHUB_EVENT_NAME!=="pull_request"||process.env.GITHUB_RUN_ATTEMPT!=="1"||!Number.isSafeInteger(id)||id<1||!/^[a-f0-9]{40}$/.test(pin))hold("SCOPE");
+            const run=await get("/actions/runs/"+id);
+            if(run.id!==id||run.head_sha!==pin||run.head_branch!=="review/nov18-actual-runner-capacity"||run.event!=="pull_request"||run.run_attempt!==1||run.path!==".github/workflows/review-runner-capacity.yml")hold("RUN_IDENTITY");
+            const q=await get("/actions/runs/"+id+"/jobs?filter=latest&per_page=100");
+            if(q.total_count!==25||q.jobs?.length!==25||new Set(q.jobs.map(j=>j.id)).size!==25)hold("JOB_COUNT");
+            const slots=q.jobs.filter(j=>/^runner-capacity-slot \((0[1-9]|1[0-9]|2[0-4])\)$/.test(j.name));
+            if(slots.length!==24||new Set(slots.map(j=>j.name)).size!==24||!slots.every(j=>j.run_id===id&&j.head_sha===pin&&j.run_attempt===1&&j.status==="completed"))hold("JOB_IDENTITY");
+            const evidence=[],created=time(run.created_at);
+            for(const j of slots){
+              if(j.conclusion!=="success"){evidence.push({slot:j.name,conclusion:j.conclusion});continue;}
+              const s=j.steps?.filter(x=>x.name==="Occupy lightweight runner for 90 seconds (no provider or DB)");
+              if(s?.length!==1||s[0].conclusion!=="success"||s[0].status!=="completed")hold("HOLD_STEP");
+              const a=time(j.started_at),z=time(j.completed_at),c=time(s[0].started_at),d=time(s[0].completed_at);
+              if(a<created-1000||c<a-1000||d>z+1000||d-c<89000||d-c>230000||z<a)hold("CLOCK_ORDER");
+              evidence.push({slot:j.name,jobId:j.id,conclusion:j.conclusion,jobStartUtc:j.started_at,jobEndUtc:j.completed_at,stepStartUtc:s[0].started_at,stepEndUtc:s[0].completed_at,createdToHoldingMs:c-created});
+            }
+            const good=evidence.filter(x=>x.conclusion==="success"),delays=good.map(x=>x.createdToHoldingMs).sort((a,b)=>a-b);
+            const summary={status:"REAL_HOSTED_RUNNER_ALLOCATION_SAMPLE_NOT_PRODUCTION_CAPACITY_GUARANTEE",runId:id,head:pin,attempted:24,successful:good.length,failedOrCancelled:24-good.length,peakConcurrentAllocatedJobs:peak(good.map(x=>[time(x.jobStartUtc),time(x.jobEndUtc)])),peakConcurrentHoldingSteps:peak(good.map(x=>[time(x.stepStartUtc),time(x.stepEndUtc)])),within120Seconds:good.filter(x=>x.createdToHoldingMs<=120000).length,medianStartMs:delays.length?delays[Math.ceil(delays.length/2)-1]:null,maxStartMs:delays.at(-1)??null,providerCalls:0,databaseCalls:0,targetDispatches:0,paidAuthorityGranted:false,evidence};
+            console.log(JSON.stringify(summary));
+            if(good.length!==24)process.exitCode=2;
+          }
+          try{await go()}catch(e){console.error(/^HOLD_CAPACITY_[A-Z0-9_]+$/.test(e.message)?e.message:"HOLD_CAPACITY_REDACTED");process.exitCode=2}
+          NODE
