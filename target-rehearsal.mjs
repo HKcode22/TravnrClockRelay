@@ -38,7 +38,7 @@ export async function rehearse(env,{fetcher=fetch,readLog=(f,t,j)=>readPrimaryVe
  if(env.GITHUB_ACTIONS!=="true"||env.GITHUB_REPOSITORY!==RELAY||env.GITHUB_REF!=="refs/heads/main"||
     env.GITHUB_EVENT_NAME!=="workflow_dispatch"||env.GITHUB_RUN_ATTEMPT!=="1"||!id(n)||!sha(pin)||
     env.TRAVNR_REHEARSAL_RELAY_PIN!==pin||env.TRAVNR_REHEARSAL_TARGET_PIN!==TARGET_SHA||
-    env.TRAVNR_REHEARSAL_CONFIRM!=="ONE_CROSS_REPO_OBSERVE_ONLY_NO_PROVIDER_NO_DB"||
+    env.TRAVNR_REHEARSAL_CONFIRM!=="ONE_CROSS_REPO_OBSERVE_ONLY_NO_PROVIDER_NO_DB"||env.TRAVNR_TARGET_REHEARSAL_ENV_READY!=="1"||
     !/^github_pat_[A-Za-z0-9_]{25,}$/.test(token??"")||typeof own!=="string"||own.length<16||
     env.DATABASE_URL||env.RAPIDAPI_KEY||env.AERODATABOX_API_KEY||env.TRAVNR_CRON_RELAY_TOKEN||env.TRAVNR_CRON_ACCOUNT_KEY||
     env.NODE_TLS_REJECT_UNAUTHORIZED==="0")HOLD("SCOPE");
