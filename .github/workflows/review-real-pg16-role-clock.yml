@@ -1,0 +1,95 @@
+name: Actual 90-minute PG16 role-bound prearm clock rehearsal (disposable)
+on:
+  pull_request:
+    types: [opened]
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: nov18-90min-pg16-role-clock-once
+  cancel-in-progress: false
+jobs:
+  exact-db-role-wait:
+    if: >-
+      github.repository == 'HKcode22/TravnrClockRelay' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == 'HKcode22' &&
+      github.head_ref == 'review/nov18-actual-90min-pg16-role-clock' &&
+      github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 105
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-admin
+          POSTGRES_DB: neondb
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d neondb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: actions/checkout@v4
+        with:
+          repository: HKcode22/ReplitTranvr
+          ref: 45d04392e2eecfc1220230f252d2ada8cc6137e0
+          path: reviewed-production
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - name: Verify exact production code, install dependencies without lifecycle hooks
+        working-directory: reviewed-production
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = 45d04392e2eecfc1220230f252d2ada8cc6137e0
+          test "$(git hash-object server/lib/disruption/phase5V0080GitHubPrearm_v39.ts)" = 8d32ddaaa1994f8759c3fcf6d4301dec50b3abab
+          test "$(git hash-object server/lib/disruption/phase5SourceUpcomingDueQueueReadonly_v39.ts)" = ec929591937fb48c37cb5808024278b28f9e4d01
+          test "$(git hash-object server/lib/disruption/phase5Stage28DedicatedRolePool_v39.ts)" = 0a60e9d3ea869784b2f89749e310452a88e3d17a
+          npm ci --include=dev --ignore-scripts --no-audit --no-fund
+      - name: Build only disposable role privilege fixture, no flight data
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: '5432'
+          PGUSER: postgres
+          PGPASSWORD: ci-admin
+          PGDATABASE: neondb
+        run: |
+          set -Eeuo pipefail
+          test "$PGHOST" = 127.0.0.1
+          psql -X -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE phase5_fids_prepare_prod_20261107 NOLOGIN NOINHERIT;
+          CREATE ROLE phase5_fids_source_prod_20261107 NOLOGIN NOINHERIT;
+          CREATE ROLE phase5_fids_pre_writer_prod_20261107 NOLOGIN NOINHERIT;
+          CREATE ROLE phase5_fids_t24_witness_prod_20261107 NOLOGIN NOINHERIT;
+          CREATE ROLE phase5_p5_source_login_20261108 LOGIN NOINHERIT NOSUPERUSER NOCREATEROLE NOBYPASSRLS PASSWORD 'ci-only';
+          GRANT phase5_fids_source_prod_20261107 TO phase5_p5_source_login_20261108 WITH ADMIN FALSE, SET TRUE, INHERIT FALSE;
+          CREATE SCHEMA clean;
+          CREATE TABLE clean.flight_snapshots(dummy integer);
+          CREATE TABLE clean.phase5_t24_postcommit_witness_v39(dummy integer);
+          CREATE TABLE clean.phase5_fids_allowed_query_v39(dummy integer);
+          CREATE TABLE clean.phase5_fids_original_binding_v39(dummy integer);
+          CREATE TABLE clean.phase5_fids_physical_attempt_v39(dummy integer);
+          GRANT USAGE ON SCHEMA clean TO phase5_fids_source_prod_20261107;
+          GRANT INSERT ON clean.phase5_fids_original_binding_v39 TO phase5_fids_source_prod_20261107;
+          SQL
+      - name: Actual 90-minute role-verified read-only database clock wait
+        env:
+          DATABASE_URL: ''
+          V39_P5_SOURCE_DATABASE_URL: ''
+          V39_DATABASE_RUNTIME_URL: ''
+          P6_PRIVATE_READER_DATABASE_URL: ''
+          P5_V39_PRE_DATABASE_URL: ''
+          AERODATABOX_API_KEY: ''
+          RAPIDAPI_KEY: ''
+          AERODATABOX_WEBHOOK_SECRET: ''
+          TRAVNR_TARGET_ACTIONS_TOKEN: ''
+          TRAVNR_CRON_ACCOUNT_KEY: ''
+          TRAVNR_CRON_RELAY_TOKEN: ''
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+        run: reviewed-production/node_modules/.bin/tsx review-real-pg16-role-clock.mjs
