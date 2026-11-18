@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {PILOT,REPO,WF,config,validateJob,planned,classify,ack,verifyReceipt,samples,audit} from "./cron-audit.mjs";
+import {PILOT,REPO,WF,config,validateJob,planned,classify,ack,verifyReceipt,samples,audit,observeTargetStep} from "./cron-audit.mjs";
 const c=PILOT,base="https://api.github.com/repos/"+REPO,url=base+"/actions/workflows/"+WF+"/dispatches";
 const now=Date.parse("2026-11-18T07:56:00Z"),slots=planned(c,"PILOT",now),p=slots[0];
 const row=(s=p,n=1)=>({jobId:c.jobId,datePlanned:s,date:s+1,jitter:1200,identifier:"history-"+n,url,status:1,httpStatus:200});
@@ -55,4 +55,27 @@ test("recovery acknowledgement cannot certify target collection and skipped is u
 });
 test("pair mode samples at most one detail per lane and never reports full pilot proof",async()=>{
  const f=fixture(),a=await audit({c,mode:"RECENT",now,sampleLimit:1,...f});assert.equal(a.proven,1);assert.equal(a.ackOnly,8);assert.equal(f.cronCalls.length,3);assert.equal(a.fullyProven,false);
+});
+
+test("target ACK is not execution proof; distinguish pending, skipped, failed and exact completed step",async()=>{
+ const pin="b".repeat(40),c={lane:"PRIMARY_BACKSTOP",targetPin:pin},n=777;
+ const row={id:n,head_sha:pin,head_branch:"main",event:"workflow_dispatch",path:".github/workflows/phase5-primary-fids-expiry-no-provider.yml",run_attempt:1,status:"completed",conclusion:"success"};
+ const j={id:888,name:"primary-fids-expiry",run_id:n,head_sha:pin,run_attempt:1,status:"completed",conclusion:"success",steps:[{name:"Verify exact main and execute only bounded primary FIDS expiry",conclusion:"success",status:"completed"}]};
+ const get=(r=row,job=j)=>async path=>path.includes("/jobs")?{total_count:1,jobs:[job]}:r;
+ assert.equal((await observeTargetStep(c,n,get())).status,"RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF");
+ assert.equal((await observeTargetStep(c,n,get({...row,status:"queued",conclusion:null}))).status,"RELAY_TARGET_PENDING_EXECUTION");
+ assert.equal((await observeTargetStep(c,n,get({...row,conclusion:"failure"}))).status,"RELAY_TARGET_TERMINAL_FAILURE");
+ assert.equal((await observeTargetStep(c,n,get(row,{...j,conclusion:"skipped",steps:[]}))).status,"RELAY_TARGET_PROTECTED_JOB_SKIPPED");
+ await assert.rejects(observeTargetStep(c,n,get({...row,head_sha:"a".repeat(40)})),/TARGET_RUN_IDENTITY/);
+ await assert.rejects(observeTargetStep(c,n,get(row,{...j,steps:[]})),/TARGET_PROTECTED_STEP/);
+});
+test("rolling execution requires terminal receipt upload as well as actual protected step",async()=>{
+ const pin="b".repeat(40),c={lane:"ROLLING_ROOT",targetPin:pin},n=777;
+ const row={id:n,head_sha:pin,head_branch:"main",event:"workflow_dispatch",path:".github/workflows/phase6-rolling-controller-bounded-session.yml",run_attempt:1,status:"completed",conclusion:"success"};
+ const j={id:888,name:"one-protected-bounded-session",run_id:n,head_sha:pin,run_attempt:1,status:"completed",conclusion:"success",steps:[{name:"Execute one protected rolling session and reconcile accepted workers before terminal",conclusion:"success",status:"completed"}]};
+ const skip={...j,id:889,name:"offline-bounded-session-reconciliation",conclusion:"skipped",steps:[]};
+ const get=job=>async path=>path.includes("/jobs")?{total_count:2,jobs:[job,skip]}:row;
+ await assert.rejects(observeTargetStep(c,n,get(j)),/TARGET_TERMINAL_RECEIPT_STEP/);
+ const good={...j,steps:[...j.steps,{name:"Preserve terminal operational receipt for independently reviewed continuation",conclusion:"success",status:"completed"}]};
+ assert.equal((await observeTargetStep(c,n,get(good))).status,"RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF");
 });
