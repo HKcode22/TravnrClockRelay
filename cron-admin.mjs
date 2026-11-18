@@ -87,6 +87,40 @@ export async function manage({op,lane,until,token,now,jobId,confirm,pin,env},{re
  await stable();
  return {status:want?"MANAGED_CRON_ENABLED_VERIFIED_NOT_EXECUTION_PROOF":"MANAGED_CRON_DISABLED_VERIFIED",lane,jobId,until,relayPin:pin,attemptUtc,readbackUtc:iso(Date.now()),cronMutations:1,...zero};
 }
+/** One owner-reviewed operation, create both recovery jobs disabled.
+ * No subsequent mutation after a failed/ambiguous ACK; no rollback or retry.
+ * A partial pair requires separately reviewed reconciliation, never another pair create.
+ */
+export async function createDisabledPair({until,token,now,jobId,confirm,pin,env},deps){
+ const {request,main,emit=()=>{}}=deps;
+ if(confirm!=="CREATE_BOTH_RECOVERY_CRON_JOBS_DISABLED_NO_FORWARD"||jobId!==null||!sha(pin)||
+    !["","CLOCK_ONLY",undefined].includes(env?.TRAVNR_RELAY_MODE)||
+    env?.TRAVNR_RELAY_PRIMARY_ENABLED==="1"||env?.TRAVNR_RELAY_ROLLING_ENABLED==="1"||
+    env?.TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED==="1")HOLD("PAIR_STOP_SCOPE");
+ const lanes=["PRIMARY_BACKSTOP","ROLLING_ROOT"],specs=lanes.map(lane=>managedSpec({lane,until,token,now}));
+ const stable=async()=>{if(await main()!==pin)HOLD("RELAY_MAIN_DRIFT")};
+ await stable();
+ const before=await request("GET","/jobs");
+ for(const s of specs)listMatch(before,s,null,now);
+ const verified=[];
+ for(const lane of lanes){
+  const out=await manage({op:"CREATE_DISABLED",lane,until,token,now,jobId:null,
+   confirm:"CREATE_EXACT_DISABLED_MANAGED_CRON_JOB",pin,env},deps);
+  if(out.status!=="MANAGED_CRON_CREATED_DISABLED_VERIFIED"||!id(out.jobId)||
+    verified.some(x=>x.jobId===out.jobId))HOLD("PAIR_ACK_SCOPE");
+  verified.push({lane,jobId:out.jobId});
+  emit({status:"PAIR_MEMBER_DISABLED_VERIFIED",...verified.at(-1),relayPin:pin});
+ }
+ const after=await request("GET","/jobs");
+ for(let i=0;i<verified.length;i++){
+  const v=verified[i],spec=specs[i];
+  listMatch(after,spec,v.jobId,now);
+  exactManaged((await request("GET","/jobs/"+v.jobId)).jobDetails,spec,v.jobId,false);
+ }
+ await stable();
+ return {status:"MANAGED_RECOVERY_PAIR_DISABLED_VERIFIED_NO_FORWARD",jobs:verified,
+  until,relayPin:pin,cronMutations:2,...zero};
+}
 /** The current expiring pilot can be rekeyed locally without changing its
  * job identity, schedule, enabled setting, or relay main. Failed slots
  * remain in history; no attempt is made to repair/backdate them. */
@@ -108,12 +142,12 @@ export async function rekeyPilot({token,now,allowWrite=true},{request,main,emit=
  await stable();
  return {status:"PILOT_REKEY_VERIFIED_NOT_SLOT_PROOF",jobId:PILOT.jobId,expiryUnchanged:PILOT.until,readbackUtc:iso(Date.now()),cronMutations:1,...zero};
 }
-function requestWith(key){
+function requestWith(key,pair=false){
  if(typeof key!=="string"||key.length<16)HOLD("ACCOUNT_KEY_REQUIRED");
  let reads=0,writes=0;
  return async(method,path,body)=>{
   if(!["GET","PUT","PATCH"].includes(method)||!/^\/jobs(?:\/[1-9][0-9]{0,14})?$/.test(path)||
-     (method==="GET"?++reads>6:++writes>1))HOLD("API_BOUND");
+     (method==="GET"?++reads>(pair?8:6):++writes>(pair?2:1)))HOLD("API_BOUND");
   const r=await fetch(ROOT+path,{method,headers:{Authorization:"Bearer "+key,"Content-Type":"application/json"},redirect:"error",signal:AbortSignal.timeout(12000),...(body?{body:JSON.stringify(body)}:{})});
   if(!r.ok)HOLD("HTTP_"+r.status+"_INSPECT_NO_REPLAY");
   const x=await r.json();await new Promise(r=>setTimeout(r,250));return x;
@@ -122,7 +156,8 @@ function requestWith(key){
 async function main(){
  const e=process.env,local=process.argv[2]==="--owner-rekey-pilot";
  if(e.DATABASE_URL||e.RAPIDAPI_KEY||e.AERODATABOX_API_KEY||e.TRAVNR_TARGET_ACTIONS_TOKEN||e.NODE_TLS_REJECT_UNAUTHORIZED==="0")HOLD("FORBIDDEN_CREDENTIAL_SCOPE");
- const request=requestWith(e.TRAVNR_CRON_ACCOUNT_KEY),token=e.TRAVNR_CRON_RELAY_TOKEN,emit=x=>console.log(JSON.stringify(x));
+ const pair=!local&&e.TRAVNR_MANAGED_OP==="CREATE_DISABLED_PAIR";
+ const request=requestWith(e.TRAVNR_CRON_ACCOUNT_KEY,pair),token=e.TRAVNR_CRON_RELAY_TOKEN,emit=x=>console.log(JSON.stringify(x));
  const main=async()=>{
   if(local){try{return JSON.parse(execFileSync("gh",["api","--hostname","github.com","--method","GET","repos/"+REPO+"/git/ref/heads/main"],{env:{PATH:e.PATH,HOME:e.HOME,GH_PROMPT_DISABLED:"1",...(e.GH_CONFIG_DIR?{GH_CONFIG_DIR:e.GH_CONFIG_DIR}:{}),...(e.GH_TOKEN?{GH_TOKEN:e.GH_TOKEN}:{})},encoding:"utf8",timeout:15000,maxBuffer:32768,stdio:["ignore","pipe","ignore"]})).object?.sha}catch{HOLD("LOCAL_GITHUB_READ")}}
   const auth=e.GITHUB_TOKEN;
@@ -149,8 +184,10 @@ async function main(){
  if(e.GITHUB_ACTIONS!=="true"||e.GITHUB_REPOSITORY!==REPO||e.GITHUB_REF!=="refs/heads/main"||e.GITHUB_EVENT_NAME!=="workflow_dispatch"||
     e.GITHUB_RUN_ATTEMPT!=="1"||e.GITHUB_SHA!==e.TRAVNR_APPROVED_RELAY_MAIN_SHA||e.TRAVNR_CRON_MANAGEMENT_ENV_READY!=="1")HOLD("EXACT_MAIN_MANUAL_ONLY");
  const jobId=e.TRAVNR_MANAGED_JOB_ID?Number(e.TRAVNR_MANAGED_JOB_ID):null;
- const out=await manage({op:e.TRAVNR_MANAGED_OP,lane:e.TRAVNR_MANAGED_LANE,until:e.TRAVNR_MANAGED_UNTIL_UTC,token,now:Date.now(),jobId,
-  confirm:e.TRAVNR_MANAGED_CONFIRM,pin:e.GITHUB_SHA,env:e},{request,main,emit});
+ if(pair&&e.TRAVNR_MANAGED_LANE!=="RECOVERY_PAIR")HOLD("PAIR_LANE");
+ const cfg={op:e.TRAVNR_MANAGED_OP,lane:e.TRAVNR_MANAGED_LANE,until:e.TRAVNR_MANAGED_UNTIL_UTC,token,now:Date.now(),jobId,
+  confirm:e.TRAVNR_MANAGED_CONFIRM,pin:e.GITHUB_SHA,env:e};
+ const out=await (pair?createDisabledPair:manage)(cfg,{request,main,emit});
  console.log(JSON.stringify(out));
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url))main().catch(e=>{console.error(/^HOLD_CRON_(ADMIN|MANAGER)_[A-Z0-9_]+$/.test(e?.message||"")?e.message:"HOLD_CRON_ADMIN_REDACTED_INSPECT_NO_REPLAY");process.exitCode=2});
