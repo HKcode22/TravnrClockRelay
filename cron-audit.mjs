@@ -2,7 +2,7 @@ import {execFileSync} from "node:child_process";
 import {resolve} from "node:path";
 import {fileURLToPath} from "node:url";
 export const REPO="HKcode22/TravnrClockRelay",WF="external-clock.yml";
-const GH="https://api.github.com/repos/"+REPO,CRON="https://api.cron-job.org";
+const GH="https://api.github.com/repos/"+REPO,CRON="https://api.cron-job.org",TARGET_PUBLIC="https://api.github.com/repos/HKcode22/ReplitTranvr";
 const URL=GH+"/actions/workflows/"+WF+"/dispatches";
 const HOLD=s=>{throw Error("HOLD_CRON_MANAGER_"+s)};
 const id=x=>Number.isSafeInteger(x)&&x>0,sha=x=>typeof x==="string"&&/^[a-f0-9]{40}$/.test(x),iso=x=>new Date(x).toISOString();
@@ -23,7 +23,7 @@ export function config(env,mode,lane="CLOCK_ONLY"){
  const c={lane,jobId:Number(env[pre+"JOB_ID"]),title:MANAGED_LANES[lane].title,pin:env.TRAVNR_CRON_RELAY_SHA,from:env[pre+"START_UTC"],enabledReadback:env[pre+"ENABLED_UTC"],until:env[pre+"UNTIL_UTC"]};
  if(!/^[1-9]\d{0,14}$/.test(env[pre+"JOB_ID"]??"")||!sha(c.pin)||!id(c.jobId))HOLD("CONFIG");
  const a=time(c.from),b=time(c.enabledReadback),z=time(c.until);
- if(b<a||b-a>60000||z<=b||z-a>32*86400000)HOLD("CONFIG_WINDOW");
+ if(b<a||b-a>60000||z<=b||z-a>60*86400000)HOLD("CONFIG_WINDOW");
  return c;
 }
 export function validateJob(c,j){
@@ -131,6 +131,33 @@ function verifyRecoveryOutput(c,r,n,run,j,log){
  if(review.includes(x.status))return {status:"RELAY_REVIEW_REQUIRED",...result};
  HOLD("RECOVERY_UNKNOWN_DISPOSITION");
 }
+/** Target public metadata only: ACK is not terminal success, and even
+ * a verified protected step does not establish provider or collection proof. */
+export async function observeTargetStep(c,targetRunId,targetGh){
+ const lane=laneOf(c),primary=lane==="PRIMARY_BACKSTOP";
+ if(!["PRIMARY_BACKSTOP","ROLLING_ROOT"].includes(lane)||!id(targetRunId)||!sha(c.targetPin)||typeof targetGh!=="function")HOLD("TARGET_OBSERVATION_SCOPE");
+ const workflow=primary?"phase5-primary-fids-expiry-no-provider.yml":"phase6-rolling-controller-bounded-session.yml";
+ const expectedJob=primary?"primary-fids-expiry":"one-protected-bounded-session";
+ const expectedStep=primary?"Verify exact main and execute only bounded primary FIDS expiry":"Execute one protected rolling session and reconcile accepted workers before terminal";
+ const r=await targetGh("/actions/runs/"+targetRunId);
+ if(r?.id!==targetRunId||r.head_sha!==c.targetPin||r.head_branch!=="main"||r.event!=="workflow_dispatch"||
+    r.path!==".github/workflows/"+workflow||r.run_attempt!==1)HOLD("TARGET_RUN_IDENTITY");
+ if(!["completed","queued","in_progress","waiting","requested","pending"].includes(r.status))HOLD("TARGET_STATUS");
+ if(r.status!=="completed")return {status:"RELAY_TARGET_PENDING_EXECUTION",targetRunId,targetStatus:r.status};
+ if(r.conclusion!=="success")return {status:"RELAY_TARGET_TERMINAL_FAILURE",targetRunId,targetConclusion:r.conclusion};
+ const jobs=await targetGh("/actions/runs/"+targetRunId+"/jobs?filter=latest&per_page=100");
+ if(!Array.isArray(jobs?.jobs)||jobs.total_count!==jobs.jobs.length||jobs.total_count!==(primary?1:2)||
+    new Set(jobs.jobs.map(j=>j.id)).size!==jobs.jobs.length||
+    !jobs.jobs.every(j=>id(j.id)&&j.run_id===targetRunId&&j.head_sha===c.targetPin&&j.run_attempt===1&&j.status==="completed"))HOLD("TARGET_JOBS");
+ const matches=jobs.jobs.filter(j=>j.name===expectedJob);
+ if(matches.length!==1)HOLD("TARGET_PROTECTED_JOB");
+ const j=matches[0];
+ if(!primary){const other=jobs.jobs.find(x=>x.name==="offline-bounded-session-reconciliation");if(other?.conclusion!=="skipped"||!(other.steps==null||Array.isArray(other.steps)&&other.steps.length===0))HOLD("TARGET_UNEXPECTED_JOB");}
+ if(j.conclusion==="skipped"&&(j.steps==null||Array.isArray(j.steps)&&j.steps.length===0))return {status:"RELAY_TARGET_PROTECTED_JOB_SKIPPED",targetRunId,targetJobId:j.id};
+ if(j.conclusion!=="success"||j.steps?.filter(s=>s.name===expectedStep&&s.conclusion==="success"&&s.status==="completed").length!==1)HOLD("TARGET_PROTECTED_STEP");
+ if(!primary&&j.steps?.filter(s=>s.name==="Preserve terminal operational receipt for independently reviewed continuation"&&s.conclusion==="success"&&s.status==="completed").length!==1)HOLD("TARGET_TERMINAL_RECEIPT_STEP");
+ return {status:"RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF",targetRunId,targetJobId:j.id,targetPin:c.targetPin};
+}
 export function samples(rows,mode,limit=3){
  const good=rows.filter(x=>x.status==="CRON_HTTP_ACK_ONLY");
  if(mode==="PILOT")return good;
@@ -140,7 +167,15 @@ export function samples(rows,mode,limit=3){
  const max=[...good].sort((a,b)=>b.row.jitter-a.row.jitter||a.planned-b.planned)[0];
  return [...new Map([good[0],good.at(-1),max].filter(Boolean).map(x=>[x.planned,x])).values()];
 }
-export async function audit({c,mode,now,cron,gh,logs,sampleLimit=3}){
+/** Read-only expiry warning; never extends an authorization. */
+export function leaseHealth(c,mode,now){
+ if(mode==="PILOT")return null;
+ const end=time(c.until);
+ if(!Number.isSafeInteger(now))HOLD("CLOCK");
+ const remaining=end-now;
+ return {remainingMs:Math.max(0,remaining),state:remaining<=0?"EXPIRED":remaining<=48*3600000?"RENEWAL_CRITICAL":remaining<=7*86400000?"RENEWAL_DUE_REVIEW":"LEASE_CURRENT"};
+}
+export async function audit({c,mode,now,cron,gh,logs,targetGh,sampleLimit=3}){
  const detail=validateJob(c,(await cron("/jobs/"+c.jobId)).jobDetails);
  const slots=planned(c,mode,now),h=await cron("/jobs/"+c.jobId+"/history"),{rows,unexpected}=classify(c,slots,h.history);
  const selected=samples(rows,mode,sampleLimit),used=new Set();
@@ -157,14 +192,16 @@ export async function audit({c,mode,now,cron,gh,logs,sampleLimit=3}){
     if(j.conclusion!=="skipped")log=await logs(n,j.id);
    }
    Object.assign(x,verifyReceipt(c,r,n,run,jobs,log));
+   if(x.status==="RELAY_TARGET_ACK_ONLY"&&targetGh)Object.assign(x,await observeTargetStep(c,x.targetRunId,targetGh));
   }catch(e){x.status="EVIDENCE_HOLD";x.reason=/^HOLD_CRON_MANAGER_[A-Z0-9_]+$/.test(e?.message||"")?e.message:"HOLD_CRON_MANAGER_UNKNOWN";}
  }
  const safe=rows.map(({row,...x})=>({...x,plannedUtc:iso(x.planned*1000)}));
  const proven=safe.filter(x=>x.status==="CLOCK_ONLY_PROVEN"),timed=safe.filter(x=>Number.isFinite(x.plannedToRunnerMs)),late=timed.filter(x=>x.plannedToRunnerMs>120000),ackOnly=safe.filter(x=>x.status==="CRON_HTTP_ACK_ONLY");
- const relayTargetAcks=safe.filter(x=>x.status==="RELAY_TARGET_ACK_ONLY").length,relayDefers=safe.filter(x=>x.status==="RELAY_OBSERVED_DEFER_NO_WORK_PROOF").length;
- const bad=safe.filter(x=>!["CLOCK_ONLY_PROVEN","CRON_HTTP_ACK_ONLY","RELAY_TARGET_ACK_ONLY","RELAY_OBSERVED_DEFER_NO_WORK_PROOF"].includes(x.status));
+ const relayTargetAcks=safe.filter(x=>id(x.targetRunId)).length,relayTargetExecutions=safe.filter(x=>x.status==="RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF").length,relayDefers=safe.filter(x=>x.status==="RELAY_OBSERVED_DEFER_NO_WORK_PROOF").length;
+ const bad=safe.filter(x=>!["CLOCK_ONLY_PROVEN","CRON_HTTP_ACK_ONLY","RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF","RELAY_OBSERVED_DEFER_NO_WORK_PROOF"].includes(x.status));
  const expired=now>=time(c.until)+120000,disabledEarly=now<time(c.until)&&!detail.enabled;
- return {status:"READONLY_CRON_AND_RELAY_AUDIT_NOT_COLLECTION_PROOF",mode,lane:laneOf(c),jobId:c.jobId,relayPin:c.pin,observedUtc:iso(now),auditFirstPlannedUtc:slots.length?iso(slots[0]*1000):null,auditLastPlannedUtc:slots.length?iso(slots.at(-1)*1000):null,expected:slots.length,proven:proven.length,ackOnly:ackOnly.length,relayTargetAcks,relayDefers,unresolved:bad.length,unexpectedRows:unexpected,over120Seconds:late.length,expired,disabledEarly,
+ return {status:"READONLY_CRON_AND_RELAY_AUDIT_NOT_COLLECTION_PROOF",mode,lane:laneOf(c),jobId:c.jobId,relayPin:c.pin,observedUtc:iso(now),auditFirstPlannedUtc:slots.length?iso(slots[0]*1000):null,auditLastPlannedUtc:slots.length?iso(slots.at(-1)*1000):null,expected:slots.length,proven:proven.length,ackOnly:ackOnly.length,relayTargetAcks,relayTargetExecutions,relayDefers,unresolved:bad.length,unexpectedRows:unexpected,over120Seconds:late.length,expired,disabledEarly,
+  leaseHealth:leaseHealth(c,mode,now),
   fullyProven:expired&&mode==="PILOT"&&slots.length>0&&proven.length===slots.length&&unexpected===0,
   timingTargetMet:expired&&mode==="PILOT"&&slots.length>0&&proven.length===slots.length&&unexpected===0&&late.length===0,
   maxPlannedToRunnerMs:timed.length?Math.max(...timed.map(x=>x.plannedToRunnerMs)):null,rows:safe,
@@ -180,7 +217,8 @@ async function main(){
     typeof e.TRAVNR_CRON_ACCOUNT_KEY!=="string"||e.TRAVNR_CRON_ACCOUNT_KEY.length<16)HOLD("SECRET_SCOPE");
  const layout=mode==="PILOT"?"CLOCK_ONLY":e.TRAVNR_CRON_AUDIT_LAYOUT||"CLOCK_ONLY";
  if(!["CLOCK_ONLY","RECOVERY_PAIR"].includes(layout))HOLD("AUDIT_LAYOUT");
- const configs=(layout==="RECOVERY_PAIR"?["PRIMARY_BACKSTOP","ROLLING_ROOT"]:["CLOCK_ONLY"]).map(l=>config(e,mode,l));
+ const configs=(layout==="RECOVERY_PAIR"?["PRIMARY_BACKSTOP","ROLLING_ROOT"]:["CLOCK_ONLY"]).map(l=>({...config(e,mode,l),...(layout==="RECOVERY_PAIR"?{targetPin:e.TRAVNR_APPROVED_TARGET_MAIN_SHA}:{})}));
+ if(layout==="RECOVERY_PAIR"&&!configs.every(c=>sha(c.targetPin)))HOLD("TARGET_AUDIT_PIN_REQUIRED");
  if(new Set(configs.map(x=>x.jobId)).size!==configs.length)HOLD("DUPLICATE_AUDIT_JOB");
  const allowed=new Set(configs.map(x=>String(x.jobId))),max=mode==="PILOT"?15:layout==="RECOVERY_PAIR"?6:5;
  let calls=0;
@@ -201,13 +239,19 @@ async function main(){
   const a=await fetch(GH+p,{method:"GET",headers:{Authorization:"Bearer "+e.GITHUB_TOKEN,Accept:"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"},redirect:"error",signal:AbortSignal.timeout(10000)});
   if(!a.ok)HOLD("GH_HTTP_"+a.status);return a.json();
  };
+ let targetReads=0;
+ const targetGh=async p=>{
+  if(layout!=="RECOVERY_PAIR"||++targetReads>4||!/^\/actions\/runs\/[1-9][0-9]{0,14}(?:\/jobs\?filter=latest&per_page=100)?$/.test(p))HOLD("PUBLIC_TARGET_READ_SCOPE");
+  const a=await fetch(TARGET_PUBLIC+p,{method:"GET",headers:{Accept:"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"},redirect:"error",signal:AbortSignal.timeout(10000)});
+  if(!a.ok)HOLD("PUBLIC_TARGET_HTTP_"+a.status);return a.json();
+ };
  const logs=(n,j)=>cli(["run","view",String(n),"-R",REPO,"--job",String(j),"--log"],2*1024*1024);
  for(const c of configs){
   const before=calls;
   try{
-   const out=await audit({c,mode,now:Date.now(),cron,gh,logs,sampleLimit:layout==="RECOVERY_PAIR"?1:3});
+   const out=await audit({c,mode,now:Date.now(),cron,gh,logs,targetGh:layout==="RECOVERY_PAIR"?targetGh:undefined,sampleLimit:layout==="RECOVERY_PAIR"?1:3});
    console.log(JSON.stringify({...out,cronApiReads:calls-before}));
-   if(out.unresolved||out.unexpectedRows||out.disabledEarly||out.over120Seconds||(out.expired&&(mode==="RECENT"||!out.fullyProven)))process.exitCode=2;
+   if(out.unresolved||out.unexpectedRows||out.disabledEarly||out.over120Seconds||out.leaseHealth?.state==="RENEWAL_CRITICAL"||out.leaseHealth?.state==="EXPIRED"||(out.expired&&(mode==="RECENT"||!out.fullyProven)))process.exitCode=2;
   }catch(err){console.error(JSON.stringify({status:"AUDIT_LANE_UNVERIFIED",lane:laneOf(c),jobId:c.jobId,reason:/^HOLD_CRON_MANAGER_[A-Z0-9_]+$/.test(err?.message??"")?err.message:"HOLD_CRON_MANAGER_REDACTED",cronApiReads:calls-before}));process.exitCode=2;}
  }
 }

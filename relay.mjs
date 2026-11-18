@@ -133,6 +133,7 @@ export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep
   if(mode==="CLOCK_ONLY")return result("EXTERNAL_CLOCK_OBSERVED_NO_TARGET_DISPATCH",clock);
   const lanePrefix=mode==="PRIMARY_BACKSTOP"?"TRAVNR_RELAY_PRIMARY":"TRAVNR_RELAY_ROLLING";
   if(multi&&env[lanePrefix+"_ENABLED"]!=="1")return result("DEFER_SEPARATE_LANE_OFF",clock);
+  if(multi&&env.TRAVNR_TARGET_FORWARD_ENV_READY!=="1")HOLD("TARGET_FORWARD_ENV_NOT_COMMISSIONED");
   if(!sha(env.TRAVNR_APPROVED_TARGET_MAIN_SHA)||typeof env.TRAVNR_TARGET_ACTIONS_TOKEN!=="string"||env.TRAVNR_TARGET_ACTIONS_TOKEN.length<16)HOLD("TARGET_CONFIGURATION");
   const since=stamp(multi?env[lanePrefix+"_SINCE_UTC"]:env.TRAVNR_RELAY_MODE_SINCE_UTC);
   if(since>start||start-since>60*24*3600000)HOLD("MODE_CLOCK");

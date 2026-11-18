@@ -8,7 +8,7 @@ on:
       operation:
         required: true
         type: choice
-        options: [CREATE_DISABLED, CREATE_DISABLED_PAIR, ENABLE_EXACT, DISABLE_EXACT]
+        options: [CREATE_DISABLED, CREATE_DISABLED_PAIR, ENABLE_EXACT, DISABLE_EXACT, RENEW_EXACT_LEASE]
         default: CREATE_DISABLED
       lane:
         required: true
@@ -22,6 +22,10 @@ on:
         description: 'Exact reviewed UTC expiry ISO instant, including milliseconds'
         required: true
         type: string
+      prior_expires_utc:
+        description: 'Required existing exact UTC expiry for lease renewal only'
+        type: string
+        default: ''
       approved_relay_main_sha:
         required: true
         type: string
@@ -54,7 +58,8 @@ jobs:
       ((inputs.operation == 'CREATE_DISABLED' && inputs.confirm == 'CREATE_EXACT_DISABLED_MANAGED_CRON_JOB') ||
       (inputs.operation == 'CREATE_DISABLED_PAIR' && inputs.lane == 'RECOVERY_PAIR' && inputs.confirm == 'CREATE_BOTH_RECOVERY_CRON_JOBS_DISABLED_NO_FORWARD') ||
       (inputs.operation == 'ENABLE_EXACT' && inputs.confirm == 'ENABLE_EXACT_MANAGED_CRON_JOB') ||
-      (inputs.operation == 'DISABLE_EXACT' && inputs.confirm == 'DISABLE_EXACT_MANAGED_CRON_JOB'))
+      (inputs.operation == 'DISABLE_EXACT' && inputs.confirm == 'DISABLE_EXACT_MANAGED_CRON_JOB') ||
+      (inputs.operation == 'RENEW_EXACT_LEASE' && inputs.confirm == 'RENEW_ACTIVE_MANAGED_CRON_LEASE_ONLY'))
     environment: travnr-cron-management
     runs-on: ubuntu-latest
     timeout-minutes: 4
@@ -73,6 +78,7 @@ jobs:
           TRAVNR_MANAGED_LANE: ${{ inputs.lane }}
           TRAVNR_MANAGED_JOB_ID: ${{ inputs.job_id }}
           TRAVNR_MANAGED_UNTIL_UTC: ${{ inputs.expires_utc }}
+          TRAVNR_MANAGED_PRIOR_UNTIL_UTC: ${{ inputs.prior_expires_utc }}
           TRAVNR_APPROVED_RELAY_MAIN_SHA: ${{ inputs.approved_relay_main_sha }}
           TRAVNR_MANAGED_CONFIRM: ${{ inputs.confirm }}
           TRAVNR_RELAY_MODE: ${{ vars.TRAVNR_RELAY_MODE }}
