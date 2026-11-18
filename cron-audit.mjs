@@ -192,8 +192,8 @@ async function main(){
   const data=await a.json();await new Promise(r=>setTimeout(r,250));return data;
  };
  const ghEnv={PATH:e.PATH,HOME:e.HOME,GH_PROMPT_DISABLED:"1",GH_HOST:"github.com",
-   ...(e.GH_CONFIG_DIR?{GH_CONFIG_DIR:e.GH_CONFIG_DIR}:{}),
-   ...(local?(e.GH_TOKEN?{GH_TOKEN:e.GH_TOKEN}:{}):{GH_TOKEN:e.GITHUB_TOKEN})};
+   ...(e.GH_CONFIG_DIR?{GH_CONFIG_DIR:e.GH_CONFIG_DIR}:{}),...(e.XDG_CONFIG_HOME?{XDG_CONFIG_HOME:e.XDG_CONFIG_HOME}:{}),
+   ...(local?(e.GH_TOKEN?{GH_TOKEN:e.GH_TOKEN}:e.GITHUB_TOKEN?{GITHUB_TOKEN:e.GITHUB_TOKEN}:{}):{GH_TOKEN:e.GITHUB_TOKEN})};
  const cli=(args,maxBuffer)=>execFileSync("gh",args,{env:ghEnv,encoding:"utf8",timeout:30000,maxBuffer,stdio:["ignore","pipe","ignore"]});
  const gh=async p=>{
   if(!/^\/actions\/runs\/[1-9][0-9]{0,14}(?:\/jobs\?filter=latest&per_page=100)?$/.test(p))HOLD("GH_READ_SCOPE");
