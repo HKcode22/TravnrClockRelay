@@ -1,0 +1,79 @@
+name: Managed cron clock audit (read-only)
+on:
+  pull_request:
+    branches: [main]
+    paths: ['cron-audit.mjs', 'cron-audit.test.mjs', '.github/workflows/cron-audit.yml']
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'PILOT = exact Nov18 trial; RECENT = separately configured two-hour audit'
+        type: choice
+        options: [PILOT, RECENT]
+        default: PILOT
+  schedule:
+    - cron: '43 */2 * * *'
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: managed-cron-audit-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'main' }}
+  cancel-in-progress: false
+jobs:
+  tests-no-secret:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - run: node --check cron-audit.mjs && node --test cron-audit.test.mjs
+      - name: Read actual isolated relay metadata WITHOUT Cron credentials or dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'NODE'
+          const repo="HKcode22/TravnrClockRelay";
+          const root="https://api.github.com/repos/"+repo;
+          try{
+            const r=await fetch(root+"/actions/workflows/external-clock.yml/runs?branch=main&event=workflow_dispatch&per_page=100&created="+encodeURIComponent(">=2026-11-18T06:23:10Z"),{headers:{Authorization:"Bearer "+process.env.GH_TOKEN,Accept:"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"},redirect:"error",signal:AbortSignal.timeout(10000)});
+            if(!r.ok)throw Error("HTTP_"+r.status);
+            const q=await r.json();
+            if(!Number.isSafeInteger(q.total_count)||q.total_count>100||q.workflow_runs?.length!==q.total_count)throw Error("HISTORY");
+            const rows=q.workflow_runs.map(x=>{
+              if(x.path!==".github/workflows/external-clock.yml"||x.head_branch!=="main"||x.event!=="workflow_dispatch"||!Number.isSafeInteger(x.id)||x.run_attempt!==1)throw Error("IDENTITY");
+              return {runId:x.id,createdUtc:x.created_at,head:x.head_sha,status:x.status,conclusion:x.conclusion};
+            });
+            console.log(JSON.stringify({status:"ACTUAL_RELAY_HISTORY_NOT_EXTERNAL_ATTRIBUTION_PROOF",rows,providerCalls:0,dispatches:0}));
+          }catch(e){console.error("HOLD_ACTUAL_RELAY_HISTORY");process.exitCode=2}
+          NODE
+  readonly-cron-audit:
+    if: >-
+      github.repository == 'HKcode22/TravnrClockRelay' &&
+      github.ref == 'refs/heads/main' && github.run_attempt == 1 &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'schedule' && vars.TRAVNR_CRON_AUDIT_ENABLED == '1'))
+    environment: travnr-cron-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - name: Audit exact approved clock configuration and sanitized evidence only
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TRAVNR_CRON_ACCOUNT_KEY: ${{ secrets.TRAVNR_CRON_ACCOUNT_KEY }}
+          TRAVNR_CRON_AUDIT_MODE: ${{ github.event_name == 'schedule' && 'RECENT' || inputs.mode }}
+          TRAVNR_CRON_JOB_ID: ${{ vars.TRAVNR_CRON_JOB_ID }}
+          TRAVNR_CRON_RELAY_SHA: ${{ vars.TRAVNR_CRON_RELAY_SHA }}
+          TRAVNR_CRON_START_UTC: ${{ vars.TRAVNR_CRON_START_UTC }}
+          TRAVNR_CRON_ENABLED_UTC: ${{ vars.TRAVNR_CRON_ENABLED_UTC }}
+          TRAVNR_CRON_UNTIL_UTC: ${{ vars.TRAVNR_CRON_UNTIL_UTC }}
+          TRAVNR_TARGET_ACTIONS_TOKEN: ''
+          DATABASE_URL: ''
+          AERODATABOX_API_KEY: ''
+          RAPIDAPI_KEY: ''
+        run: node cron-audit.mjs
