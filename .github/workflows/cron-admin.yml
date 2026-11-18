@@ -8,7 +8,7 @@ on:
       operation:
         required: true
         type: choice
-        options: [CREATE_DISABLED, CREATE_DISABLED_PAIR, ENABLE_EXACT, DISABLE_EXACT, RENEW_EXACT_LEASE]
+        options: [CREATE_DISABLED, CREATE_DISABLED_PAIR, ENABLE_SHADOW_PAIR, ENABLE_EXACT, DISABLE_EXACT, RENEW_EXACT_LEASE]
         default: CREATE_DISABLED
       lane:
         required: true
@@ -57,9 +57,12 @@ jobs:
       github.run_attempt == 1 && inputs.approved_relay_main_sha == github.sha &&
       ((inputs.operation == 'CREATE_DISABLED' && inputs.confirm == 'CREATE_EXACT_DISABLED_MANAGED_CRON_JOB') ||
       (inputs.operation == 'CREATE_DISABLED_PAIR' && inputs.lane == 'RECOVERY_PAIR' && inputs.confirm == 'CREATE_BOTH_RECOVERY_CRON_JOBS_DISABLED_NO_FORWARD') ||
+      (inputs.operation == 'ENABLE_SHADOW_PAIR' && inputs.lane == 'RECOVERY_PAIR' && inputs.confirm == 'ENABLE_EXACT_EXISTING_PAIR_SHADOW_NO_FORWARD') ||
       (inputs.operation == 'ENABLE_EXACT' && inputs.confirm == 'ENABLE_EXACT_MANAGED_CRON_JOB') ||
       (inputs.operation == 'DISABLE_EXACT' && inputs.confirm == 'DISABLE_EXACT_MANAGED_CRON_JOB') ||
       (inputs.operation == 'RENEW_EXACT_LEASE' && inputs.confirm == 'RENEW_ACTIVE_MANAGED_CRON_LEASE_ONLY'))
+    outputs:
+      shadow_receipt: ${{ steps.manage.outputs.shadow_receipt }}
     environment: travnr-cron-management
     runs-on: ubuntu-latest
     timeout-minutes: 4
@@ -69,6 +72,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: {node-version: '22'}
       - name: Execute one exact Cron management operation; do not replay an unknown response
+        id: manage
         env:
           GITHUB_TOKEN: ${{ github.token }}
           TRAVNR_CRON_ACCOUNT_KEY: ${{ secrets.TRAVNR_CRON_ACCOUNT_KEY }}
@@ -91,3 +95,31 @@ jobs:
           AERODATABOX_API_KEY: ''
           RAPIDAPI_KEY: ''
         run: node cron-admin.mjs
+  audit-actual-shadow-pair:
+    needs: exact-manual-management
+    if: >-
+      github.repository == 'HKcode22/TravnrClockRelay' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+      github.run_attempt == 1 && inputs.approved_relay_main_sha == github.sha &&
+      inputs.operation == 'ENABLE_SHADOW_PAIR' &&
+      inputs.confirm == 'ENABLE_EXACT_EXISTING_PAIR_SHADOW_NO_FORWARD' &&
+      needs.exact-manual-management.result == 'success'
+    environment: travnr-cron-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - name: Observe one hour and verify every eligible external tick, no forwarding
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TRAVNR_CRON_ACCOUNT_KEY: ${{ secrets.TRAVNR_CRON_ACCOUNT_KEY }}
+          TRAVNR_SHADOW_RECEIPT: ${{ needs.exact-manual-management.outputs.shadow_receipt }}
+          TRAVNR_TARGET_ACTIONS_TOKEN: ''
+          TRAVNR_CRON_RELAY_TOKEN: ''
+          DATABASE_URL: ''
+          AERODATABOX_API_KEY: ''
+          RAPIDAPI_KEY: ''
+        run: node cron-audit.mjs --shadow-pair
