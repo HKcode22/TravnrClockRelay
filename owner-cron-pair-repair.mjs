@@ -2,7 +2,6 @@
  * No new jobs, no production writes, no collection dispatch. The replacement
  * PAT must complete a real CLOCK_ONLY pulse before either old job is patched.
  * Journal fsync before every POST/PATCH; never repeat an ambiguous mutation. */
-import {createHash} from "node:crypto";
 import {execFileSync} from "node:child_process";
 import {resolve,dirname,isAbsolute} from "node:path";
 import {fileURLToPath} from "node:url";
@@ -108,7 +107,7 @@ async function main(){
   try{return execFileSync("gh",args,{env:ghEnv,input,encoding:"utf8",timeout:30000,maxBuffer:1048576,stdio:[input===undefined?"ignore":"pipe","pipe","pipe"]}).trim();}
   catch(err){console.error(JSON.stringify({status:"REPAIR_OWNER_GITHUB_HOLD",operation:label,reason:ghFailure(err),rawErrorRedacted:true}));hold("OWNER_GITHUB_INSPECT");}
  };
- if(JSON.parse(run("OWNER",["api","user"])).login!=="HKcode22")hold("OWNER_IDENTITY");
+ const actor=JSON.parse(run("OWNER",["api","user"]));if(actor.login!=="HKcode22"||!id(actor.id))hold("OWNER_IDENTITY");
  const ownerGet=async p=>JSON.parse(run("OWNER_READ",["api","--hostname","github.com","--method","GET","repos/"+REPO+p]));
  let cr=0,cw=0;
  const cron=async(method,p,body)=>{
@@ -126,7 +125,8 @@ async function main(){
  const journal=x=>{const fd=openSync(path,first?"wx":"a",0o600);first=false;try{writeFileSync(fd,JSON.stringify(x)+"\n");fsyncSync(fd)}finally{closeSync(fd)}};
  const storeToken=async t=>{
   const env="travnr-cron-management",p="/environments/"+env,e=await ownerGet(p),rules=e.protection_rules??[];
-  if(e.name!==env||e.can_admins_bypass!==false||e.deployment_branch_policy?.custom_branch_policies!==true||rules.filter(x=>x.type==="required_reviewers").length!==1)hold("MANAGEMENT_ENV_PROTECTION");
+  const reviewers=rules.filter(x=>x.type==="required_reviewers");
+  if(e.name!==env||e.can_admins_bypass!==false||e.deployment_branch_policy?.protected_branches!==false||e.deployment_branch_policy?.custom_branch_policies!==true||rules.some(x=>!["branch_policy","required_reviewers"].includes(x.type))||reviewers.length!==1||reviewers[0].prevent_self_review!==false||reviewers[0].reviewers?.length!==1||reviewers[0].reviewers[0]?.type!=="User"||reviewers[0].reviewers[0]?.reviewer?.id!==actor.id)hold("MANAGEMENT_ENV_PROTECTION");
   const b=await ownerGet(p+"/deployment-branch-policies?per_page=100");
   if(b.total_count!==1||b.branch_policies?.[0]?.name!=="main")hold("MANAGEMENT_MAIN_ONLY");
   const names=()=>JSON.parse(run("SECRET_NAMES",["secret","list","-R",REPO,"--env",env,"--json","name"])).map(x=>x.name).sort().join("|");
