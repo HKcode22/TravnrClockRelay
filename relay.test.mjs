@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {runPulse,rootInputs,cronJobSpec,readPrimaryVerifyLog,verifyPrimaryBootstrapReceipt,RELAY,TARGET,PILOT,PRIMARY,ROLLING} from "./relay.mjs";
+import {runPulse,rootInputs,cronJobSpec,readPrimaryVerifyLog,verifyPrimaryBootstrapReceipt,provesNoTargetStep,RELAY,TARGET,PILOT,PRIMARY,ROLLING} from "./relay.mjs";
 const NOW=Date.parse("2026-11-18T06:00:00.000Z"),SHA="a".repeat(40),LOCAL="b".repeat(40);
 const tok="github_pat_"+ "x".repeat(30),root="https://api.github.com/repos/";
 const wrap=(data,status=200)=>({status,ok:status===200,json:async()=>data});
@@ -20,10 +20,11 @@ function f(mode,fault=""){
   }
   assert.equal(init.method,"GET");
   if(url===root+RELAY+"/actions/runs/100")return wrap({...row(100,"external-clock.yml",LOCAL,"in_progress"),display_title:"TRAVNR EXTERNAL CLOCK "+(env.TRAVNR_RELAY_LANE||"CLOCK_ONLY")});
+  if(url===root+RELAY+"/actions/runs/712/jobs?filter=latest&per_page=100")return wrap({total_count:3,jobs:["offline-tests","independent-pulse","target-forward"].map((name,i)=>({id:900+i,name,run_id:712,head_sha:LOCAL,run_attempt:1,status:"completed",conclusion:i===2?"failure":"skipped",steps:i===2?[{name:"Run node cli.mjs",status:"completed",conclusion:fault==="skippedForward"?"skipped":"failure"}]:[]}))});
   if(url.includes(root+RELAY+"/actions/workflows/")){
-   if(env.TRAVNR_RELAY_MODE==="MULTI_LANE"&&["otherLane","sameLane","unknownLane"].includes(fault)&&url.includes("status=failure")){
-    const title=fault==="unknownLane"?"unknown":fault==="sameLane"?"TRAVNR EXTERNAL CLOCK "+env.TRAVNR_RELAY_LANE:"TRAVNR EXTERNAL CLOCK "+(env.TRAVNR_RELAY_LANE==="PRIMARY_BACKSTOP"?"ROLLING_ROOT":"PRIMARY_BACKSTOP");
-    return wrap({total_count:1,workflow_runs:[{...row(712,"external-clock.yml",LOCAL),display_title:title,conclusion:"failure"}]});
+   if(env.TRAVNR_RELAY_MODE==="MULTI_LANE"&&["otherLane","sameLane","unknownLane","skippedForward","oldCodeFailure"].includes(fault)&&url.includes("status=failure")){
+    const title=fault==="unknownLane"?"unknown":["sameLane","skippedForward","oldCodeFailure"].includes(fault)?"TRAVNR EXTERNAL CLOCK "+env.TRAVNR_RELAY_LANE:"TRAVNR EXTERNAL CLOCK "+(env.TRAVNR_RELAY_LANE==="PRIMARY_BACKSTOP"?"ROLLING_ROOT":"PRIMARY_BACKSTOP");
+    return wrap({total_count:1,workflow_runs:[{...row(712,"external-clock.yml",fault==="oldCodeFailure"?SHA:LOCAL),display_title:title,conclusion:"failure"}]});
    }
    return wrap({total_count:fault==="prior"?1:0,workflow_runs:fault==="prior"?[{}]:[]});
   }
@@ -94,4 +95,17 @@ test("VERIFY receipt must be exact, zero, unique and fresh",()=>{
 test("signed job-log retrieval never forwards target bearer or accepts arbitrary host",async()=>{
  let seen=0;const log=await readPrimaryVerifyLog(async(url,init)=>{seen++;if(seen===1){assert.equal(init.redirect,"manual");return new Response("",{status:302,headers:{Location:"https://logs.blob.core.windows.net/path?sig=fixture"}});}assert.equal(init.headers,undefined);assert.equal(init.redirect,"error");return new Response("sanitized fixture");},tok,1202);
  assert.equal(log,"sanitized fixture");assert.equal(seen,2);
+});
+
+test("exact skipped target-capable step recovers the same lane without considering uncertain POST safe",async()=>{
+ const x=multi("ROLLING_ROOT","skippedForward");assert.equal((await runPulse(x.env,x.opts)).targetRunId,201);
+ assert.equal(x.posts(),1);assert(x.events.some(e=>e.status==="PRIOR_RELAY_FAILURE_EXACT_TARGET_STEP_SKIPPED_NO_POST"));
+ const y=multi("ROLLING_ROOT","oldCodeFailure");assert.match((await runPulse(y.env,y.opts)).status,/QUARANTINED/);assert.equal(y.posts(),0);
+});
+test("missing target job or started target step never proves safe recovery",()=>{
+ const r={id:712,head_sha:LOCAL,run_attempt:1,status:"completed"};
+ const js=["offline-tests","independent-pulse","target-forward"].map((name,i)=>({id:900+i,name,run_id:r.id,head_sha:LOCAL,run_attempt:1,status:"completed",conclusion:i===2?"failure":"skipped",steps:i===2?[{name:"Run node cli.mjs",status:"completed",conclusion:"skipped"}]:[]}));
+ assert.equal(provesNoTargetStep(r,js),true);assert.equal(provesNoTargetStep(r,js.slice(0,2)),false);
+ assert.equal(provesNoTargetStep(r,[...js.slice(0,2),{...js[2],steps:[]}]),false);
+ assert.equal(provesNoTargetStep(r,[...js.slice(0,2),{...js[2],steps:[{name:"Run node cli.mjs",status:"completed",conclusion:"failure"}]}]),false);
 });
