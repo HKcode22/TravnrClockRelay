@@ -27,7 +27,10 @@ function hits(log,predicate){
 export function verifyShadowAudit(run,jobs,log){
  if(run?.id!==AUDIT_RUN||run.head_sha!==ACTIVATION_SHA||run.head_branch!=="main"||
     run.path!==".github/workflows/cron-admin.yml"||run.event!=="workflow_dispatch"||run.run_attempt!==1||run.status!=="completed"||run.conclusion!=="success"||
-    jobs?.total_count!==3||jobs.jobs?.length!==3)hold("AUDIT_IDENTITY");
+    jobs?.total_count!==3||jobs.jobs?.length!==3||new Set(jobs.jobs.map(j=>j.id)).size!==3||
+    !jobs.jobs.every(j=>ID(j.id)&&j.run_id===AUDIT_RUN&&j.head_sha===ACTIVATION_SHA&&j.run_attempt===1&&j.status==="completed")||
+    !jobs.jobs.some(j=>j.name==="exact-manual-management"&&j.conclusion==="success")||
+    !jobs.jobs.some(j=>j.name==="offline-tests"&&j.conclusion==="skipped"&&(j.steps==null||Array.isArray(j.steps)&&j.steps.length===0)))hold("AUDIT_IDENTITY");
  const j=jobs.jobs.find(x=>x.id===AUDIT_JOB);
  if(j?.name!=="audit-actual-shadow-pair"||j.run_id!==AUDIT_RUN||j.head_sha!==ACTIVATION_SHA||j.run_attempt!==1||j.status!=="completed"||j.conclusion!=="success"||
     j.steps?.filter(s=>s.name==="Observe one hour and verify every eligible external tick, no forwarding"&&s.status==="completed"&&s.conclusion==="success").length!==1)hold("AUDIT_STEP");
