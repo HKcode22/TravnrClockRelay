@@ -78,6 +78,12 @@ export function ack(c,r,d){
  return a.workflow_run_id;
 }
 export function verifyReceipt(c,r,n,run,jobs,log){
+ if(c.shadowRecent){
+  // The already-reviewed enable/test commit and this executing main are the
+  // only allowed code versions. No unreviewed intervening SHA is inferred.
+  if(![c.pin,c.activationPin].includes(run?.head_sha))HOLD("RUN_IDENTITY");
+  c={...c,pin:run.head_sha};
+ }
  if(run?.id!==n||run.head_sha!==c.pin||run.head_branch!=="main"||run.path!==".github/workflows/"+WF||
     run.event!=="workflow_dispatch"||run.run_attempt!==1||laneOf(c)!=="CLOCK_ONLY"&&run.display_title!=="TRAVNR EXTERNAL CLOCK "+laneOf(c))HOLD("RUN_IDENTITY");
  if(run.status!=="completed")return {status:"RELAY_PENDING",runId:n};
@@ -232,20 +238,36 @@ export function shadowConfigs(raw,pin){
   return {lane,jobId,pin,title:MANAGED_LANES[lane].title,from:j.attemptUtc,enabledReadback:j.readbackUtc,until:x.until,shadow:true};
  });
 }
+/** Actual protected enable receipt from run 44281886719 / job 134724442782.
+ * Runtime mode may only observe, never use the target secret or change Cron.
+ * Routine audit starts after commissioning, and each interval samples one
+ * relay per lane. HTTP-only acknowledgments are not execution proof. */
+export const SHADOW_ACTIVATION_PIN="ed35a5467dda0afc75eda386ad43ee4f401b23c4";
+const SHADOW_ACTIVATION=Object.freeze({
+ status:"EXACT_EXISTING_PAIR_SHADOW_ENABLED_NO_FORWARD",relayPin:SHADOW_ACTIVATION_PIN,until:"2026-12-19T08:00:00.000Z",
+ jobs:[{lane:"PRIMARY_BACKSTOP",jobId:8890475,attemptUtc:"2026-11-18T10:05:06.006Z",readbackUtc:"2026-11-18T10:05:06.789Z"},
+ {lane:"ROLLING_ROOT",jobId:8890476,attemptUtc:"2026-11-18T10:05:07.058Z",readbackUtc:"2026-11-18T10:05:07.842Z"}],
+ cronMutations:2,providerCalls:0,databaseWrites:0,targetDispatches:0,paidAuthorityGranted:false
+});
+export function shadowRecentConfigs(e){
+ if(e.GITHUB_EVENT_NAME!=="schedule"||!sha(e.GITHUB_SHA)||e.TRAVNR_RELAY_MODE!=="CLOCK_ONLY"||
+    [e.TRAVNR_RELAY_PRIMARY_ENABLED,e.TRAVNR_RELAY_ROLLING_ENABLED,e.TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED].some(v=>v==="1"))HOLD("SHADOW_RECENT_STOP_SCOPE");
+ return shadowConfigs(JSON.stringify(SHADOW_ACTIVATION),SHADOW_ACTIVATION_PIN).map(c=>({...c,activationPin:c.pin,pin:e.GITHUB_SHA,shadowRecent:true}));
+}
 async function main(){
- const e=process.env,local=process.argv[2]==="--owner-audit-pilot",shadow=process.argv[2]==="--shadow-pair",mode=local?"PILOT":shadow?"SHADOW":e.TRAVNR_CRON_AUDIT_MODE;
+ const e=process.env,local=process.argv[2]==="--owner-audit-pilot",shadow=process.argv[2]==="--shadow-pair",mode=local?"PILOT":shadow?"SHADOW":e.TRAVNR_CRON_AUDIT_MODE,shadowRecent=mode==="SHADOW_RECENT";
  if(local?e.GITHUB_ACTIONS==="true":e.GITHUB_ACTIONS!=="true"||e.GITHUB_REPOSITORY!==REPO||e.GITHUB_REF!=="refs/heads/main"||
     !(shadow?["workflow_dispatch"]:["schedule","push"]).includes(e.GITHUB_EVENT_NAME)||e.GITHUB_RUN_ATTEMPT!=="1"||
-    (!shadow&&(e.GITHUB_EVENT_NAME==="schedule"?mode!=="RECENT":mode!=="PILOT"||e.TRAVNR_CRON_PREVIOUS_RELAY_SHA!==PILOT.pin||Date.now()<time(PILOT.until)+120000))||
+    (!shadow&&(e.GITHUB_EVENT_NAME==="schedule"?!["RECENT","SHADOW_RECENT"].includes(mode):mode!=="PILOT"||e.TRAVNR_CRON_PREVIOUS_RELAY_SHA!==PILOT.pin||Date.now()<time(PILOT.until)+120000))||
     typeof e.GITHUB_TOKEN!=="string"||e.GITHUB_TOKEN.length<16)HOLD("RUNTIME_SCOPE");
  if(e.DATABASE_URL||e.RAPIDAPI_KEY||e.AERODATABOX_API_KEY||e.TRAVNR_TARGET_ACTIONS_TOKEN||e.NODE_TLS_REJECT_UNAUTHORIZED==="0"||
     typeof e.TRAVNR_CRON_ACCOUNT_KEY!=="string"||e.TRAVNR_CRON_ACCOUNT_KEY.length<16)HOLD("SECRET_SCOPE");
- const layout=shadow?"SHADOW_PAIR":mode==="PILOT"?"CLOCK_ONLY":e.TRAVNR_CRON_AUDIT_LAYOUT||"CLOCK_ONLY";
+ const layout=shadow||shadowRecent?"SHADOW_PAIR":mode==="PILOT"?"CLOCK_ONLY":e.TRAVNR_CRON_AUDIT_LAYOUT||"CLOCK_ONLY";
  if(!["CLOCK_ONLY","RECOVERY_PAIR","SHADOW_PAIR"].includes(layout))HOLD("AUDIT_LAYOUT");
- const configs=shadow?shadowConfigs(e.TRAVNR_SHADOW_RECEIPT,e.GITHUB_SHA):(layout==="RECOVERY_PAIR"?["PRIMARY_BACKSTOP","ROLLING_ROOT"]:["CLOCK_ONLY"]).map(l=>({...config(e,mode,l),...(layout==="RECOVERY_PAIR"?{targetPin:e.TRAVNR_APPROVED_TARGET_MAIN_SHA}:{})}));
+ const configs=shadowRecent?shadowRecentConfigs(e):shadow?shadowConfigs(e.TRAVNR_SHADOW_RECEIPT,e.GITHUB_SHA):(layout==="RECOVERY_PAIR"?["PRIMARY_BACKSTOP","ROLLING_ROOT"]:["CLOCK_ONLY"]).map(l=>({...config(e,mode,l),...(layout==="RECOVERY_PAIR"?{targetPin:e.TRAVNR_APPROVED_TARGET_MAIN_SHA}:{})}));
  if(layout==="RECOVERY_PAIR"&&!configs.every(c=>sha(c.targetPin)))HOLD("TARGET_AUDIT_PIN_REQUIRED");
  if(new Set(configs.map(x=>x.jobId)).size!==configs.length)HOLD("DUPLICATE_AUDIT_JOB");
- const allowed=new Set(configs.map(x=>String(x.jobId))),max=mode==="PILOT"||shadow?15:layout==="RECOVERY_PAIR"?6:5;
+ const allowed=new Set(configs.map(x=>String(x.jobId))),max=mode==="PILOT"||shadow?15:["RECOVERY_PAIR","SHADOW_PAIR"].includes(layout)?6:5;
  let calls=0;
  const cron=async p=>{
   const m=p.match(/^\/jobs\/([1-9][0-9]{0,14})(?:\/history(?:\/[A-Za-z0-9-]{1,100})?)?$/);
@@ -282,9 +304,9 @@ async function main(){
  for(const c of configs){
   const before=calls;
   try{
-   const out=await audit({c,mode,now:Date.now(),cron,gh,logs,targetGh:layout==="RECOVERY_PAIR"?targetGh:undefined,sampleLimit:layout==="RECOVERY_PAIR"?1:3});
+   const out=await audit({c,mode,now:Date.now(),cron,gh,logs,targetGh:layout==="RECOVERY_PAIR"?targetGh:undefined,sampleLimit:layout==="RECOVERY_PAIR"||shadowRecent?1:3});
    console.log(JSON.stringify({...out,cronApiReads:calls-before}));
-   if(shadow&&!out.shadowFullyProven||out.unresolved||out.unexpectedRows||out.disabledEarly||out.over120Seconds||out.leaseHealth?.state==="RENEWAL_CRITICAL"||out.leaseHealth?.state==="EXPIRED"||(out.expired&&(mode==="RECENT"||!out.fullyProven)))process.exitCode=2;
+   if(shadow&&!out.shadowFullyProven||shadowRecent&&out.expected>0&&out.proven!==1||out.unresolved||out.unexpectedRows||out.disabledEarly||out.over120Seconds||out.leaseHealth?.state==="RENEWAL_CRITICAL"||out.leaseHealth?.state==="EXPIRED"||(out.expired&&(mode==="RECENT"||!out.fullyProven)))process.exitCode=2;
   }catch(err){console.error(JSON.stringify({status:"AUDIT_LANE_UNVERIFIED",lane:laneOf(c),jobId:c.jobId,reason:/^HOLD_CRON_MANAGER_[A-Z0-9_]+$/.test(err?.message??"")?err.message:"HOLD_CRON_MANAGER_REDACTED",cronApiReads:calls-before}));process.exitCode=2;}
  }
 }
