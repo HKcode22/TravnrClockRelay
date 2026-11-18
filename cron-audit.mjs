@@ -86,7 +86,7 @@ export function verifyReceipt(c,r,n,run,jobs,log){
  const matches=jobs.jobs.filter(j=>j.name===(laneOf(c)==="CLOCK_ONLY"?"independent-pulse":"target-forward"));
  if(matches.length!==1)HOLD("PULSE_JOB");
  const j=matches[0];
- if(laneOf(c)!=="CLOCK_ONLY"&&j.status==="completed"&&j.conclusion==="skipped"&&j.run_id===n&&j.head_sha===c.pin&&j.run_attempt===1&&(j.steps==null||j.steps.length===0))return {status:"RELAY_FORWARD_SKIPPED",runId:n};
+ if(laneOf(c)!=="CLOCK_ONLY"&&id(j.id)&&j.status==="completed"&&j.conclusion==="skipped"&&j.run_id===n&&j.head_sha===c.pin&&j.run_attempt===1&&(j.steps==null||j.steps.length===0))return {status:"RELAY_FORWARD_SKIPPED",runId:n};
  if(!id(j.id)||j.head_sha!==c.pin||j.run_id!==n||j.run_attempt!==1||j.status!=="completed"||j.conclusion!=="success"||
     j.steps?.filter(s=>s.name==="Run node cli.mjs"&&s.status==="completed"&&s.conclusion==="success").length!==1)HOLD("PULSE_STEP");
  if(laneOf(c)!=="CLOCK_ONLY")return verifyRecoveryOutput(c,r,n,run,j,log);
@@ -105,7 +105,7 @@ function verifyRecoveryOutput(c,r,n,run,j,log){
  for(const l of String(log).split(/\r?\n/)){
   const p=l.indexOf('{"status":');if(p<0)continue;
   let a;try{a=JSON.parse(l.slice(p).trim())}catch{HOLD("RECOVERY_LOG_JSON")}
-  if(Object.hasOwn(a,"providerCallsByRelay"))rows.push(a);
+  if(a&&typeof a==="object"&&Object.hasOwn(a,"providerCallsByRelay"))rows.push(a);
  }
  if(rows.length!==1)HOLD("RECOVERY_RECEIPT_COUNT");
  const x=rows[0],base={runId:n,jobId:j.id,disposition:x.status};
@@ -207,7 +207,7 @@ async function main(){
   try{
    const out=await audit({c,mode,now:Date.now(),cron,gh,logs,sampleLimit:layout==="RECOVERY_PAIR"?1:3});
    console.log(JSON.stringify({...out,cronApiReads:calls-before}));
-   if(out.unresolved||out.unexpectedRows||out.disabledEarly||out.over120Seconds||(out.expired&&mode==="PILOT"&&!out.fullyProven))process.exitCode=2;
+   if(out.unresolved||out.unexpectedRows||out.disabledEarly||out.over120Seconds||(out.expired&&(mode==="RECENT"||!out.fullyProven)))process.exitCode=2;
   }catch(err){console.error(JSON.stringify({status:"AUDIT_LANE_UNVERIFIED",lane:laneOf(c),jobId:c.jobId,reason:/^HOLD_CRON_MANAGER_[A-Z0-9_]+$/.test(err?.message??"")?err.message:"HOLD_CRON_MANAGER_REDACTED",cronApiReads:calls-before}));process.exitCode=2;}
  }
 }
