@@ -3,13 +3,9 @@ on:
   pull_request:
     branches: [main]
     paths: ['cron-audit.mjs', 'cron-audit.test.mjs', '.github/workflows/cron-audit.yml']
-  workflow_dispatch:
-    inputs:
-      mode:
-        description: 'PILOT = exact Nov18 trial; RECENT = separately configured two-hour audit'
-        type: choice
-        options: [PILOT, RECENT]
-        default: PILOT
+  push:
+    branches: [main]
+    paths: ['cron-audit.mjs', '.github/workflows/cron-audit.yml']
   schedule:
     - cron: '43 */2 * * *'
 permissions:
@@ -52,9 +48,10 @@ jobs:
     if: >-
       github.repository == 'HKcode22/TravnrClockRelay' &&
       github.ref == 'refs/heads/main' && github.run_attempt == 1 &&
-      (github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.event.before == '9cca29330405774520e0c7929f4916e24d9934e4' &&
+       vars.TRAVNR_CRON_PILOT_AUDIT_AFTER_MERGE == '1' ||
       (github.event_name == 'schedule' && vars.TRAVNR_CRON_AUDIT_ENABLED == '1'))
-    environment: travnr-cron-management
+    environment: travnr-cron-audit
     runs-on: ubuntu-latest
     timeout-minutes: 6
     steps:
@@ -66,7 +63,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           TRAVNR_CRON_ACCOUNT_KEY: ${{ secrets.TRAVNR_CRON_ACCOUNT_KEY }}
-          TRAVNR_CRON_AUDIT_MODE: ${{ github.event_name == 'schedule' && 'RECENT' || inputs.mode }}
+          TRAVNR_CRON_AUDIT_MODE: ${{ github.event_name == 'schedule' && 'RECENT' || 'PILOT' }}
+          TRAVNR_CRON_PREVIOUS_RELAY_SHA: ${{ github.event.before }}
           TRAVNR_CRON_JOB_ID: ${{ vars.TRAVNR_CRON_JOB_ID }}
           TRAVNR_CRON_RELAY_SHA: ${{ vars.TRAVNR_CRON_RELAY_SHA }}
           TRAVNR_CRON_START_UTC: ${{ vars.TRAVNR_CRON_START_UTC }}
