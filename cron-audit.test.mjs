@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {PILOT,REPO,WF,config,validateJob,planned,classify,ack,verifyReceipt,samples,audit,observeTargetStep,leaseHealth} from "./cron-audit.mjs";
+import {PILOT,REPO,WF,config,validateJob,planned,classify,ack,verifyReceipt,samples,audit,observeTargetStep,leaseHealth,shadowConfigs} from "./cron-audit.mjs";
 const c=PILOT,base="https://api.github.com/repos/"+REPO,url=base+"/actions/workflows/"+WF+"/dispatches";
 const now=Date.parse("2026-11-18T07:56:00Z"),slots=planned(c,"PILOT",now),p=slots[0];
 const row=(s=p,n=1)=>({jobId:c.jobId,datePlanned:s,date:s+1,jitter:1200,identifier:"history-"+n,url,status:1,httpStatus:200});
@@ -93,4 +93,20 @@ test("reviewed renewal preserves original enable boundary in bounded study audit
  const q=config(e,"RECENT","PRIMARY_BACKSTOP");
  assert.equal(q.from,c.from);assert.equal(q.enabledReadback,c.enabledReadback);
  assert.throws(()=>config({...e,TRAVNR_CRON_PRIMARY_UNTIL_UTC:"2027-02-01T00:00:00.000Z"},"RECENT","PRIMARY_BACKSTOP"),/CONFIG_WINDOW/);
+});
+
+test("shadow scope exact pair activation receipt verified; wrong ID/forward authority refused",()=>{
+ const a={status:"EXACT_EXISTING_PAIR_SHADOW_ENABLED_NO_FORWARD",relayPin:c.pin,until:"2026-12-19T08:00:00.000Z",cronMutations:2,providerCalls:0,databaseWrites:0,targetDispatches:0,paidAuthorityGranted:false,jobs:[{lane:"PRIMARY_BACKSTOP",jobId:8890475,attemptUtc:c.from,readbackUtc:c.enabledReadback},{lane:"ROLLING_ROOT",jobId:8890476,attemptUtc:c.from,readbackUtc:c.enabledReadback}]};
+ assert.deepEqual(shadowConfigs(JSON.stringify(a),c.pin).map(x=>x.jobId),[8890475,8890476]);
+ assert.throws(()=>shadowConfigs(JSON.stringify({...a,paidAuthorityGranted:true}),c.pin),/SHADOW_RECEIPT_SCOPE/);
+ assert.throws(()=>shadowConfigs(JSON.stringify({...a,jobs:[{...a.jobs[0],jobId:1},a.jobs[1]]}),c.pin),/SHADOW_BOUNDARY/);
+});
+test("shadow clock requires actual shadow receipt AND skipped target-forward job",()=>{
+ const a=mk(),q={...c,lane:"PRIMARY_BACKSTOP",shadow:true},run={...a.run,display_title:"TRAVNR EXTERNAL CLOCK PRIMARY_BACKSTOP"};
+ const forward={...a.jobs.jobs[0],id:222,name:"target-forward",conclusion:"skipped",steps:[]};
+ const jobs={total_count:2,jobs:[a.jobs.jobs[0],forward]};
+ const log=JSON.stringify({...a.receipt,status:"EXTERNAL_RECOVERY_LANE_SHADOW_OBSERVED_NO_TARGET_DISPATCH",mode:"PRIMARY_BACKSTOP",relayDispatches:0});
+ assert.equal(verifyReceipt(q,a.r,101,run,jobs,log).status,"SHADOW_LANE_PROVEN_NO_FORWARD");
+ assert.throws(()=>verifyReceipt(q,a.r,101,run,{total_count:2,jobs:[jobs.jobs[0],{...forward,conclusion:"success"}]},log),/SHADOW_FORWARD_NOT_SKIPPED/);
+ assert.throws(()=>verifyReceipt(q,a.r,101,run,jobs,a.log),/RECEIPT_COUNT/);
 });
