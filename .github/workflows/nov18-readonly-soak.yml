@@ -1,0 +1,46 @@
+name: Nov18 detached 320-minute read-only scheduler soak
+on:
+  pull_request:
+    branches: [main]
+    paths: ['nov18-readonly-soak.mjs','nov18-readonly-soak.test.mjs','.github/workflows/nov18-readonly-soak.yml']
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: nov18-detached-soak-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+jobs:
+  fixture-and-hosted-observation:
+    if: >-
+      github.repository == 'HKcode22/TravnrClockRelay' &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == 'HKcode22/TravnrClockRelay' &&
+      github.head_ref == 'phase5/nov18-readonly-scheduler-soak' &&
+      github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - name: Verify synthetic audit classification before actual observation
+        run: node --check nov18-readonly-soak.mjs && node --test nov18-readonly-soak.test.mjs
+      - name: Observe actual existing relay and production metadata every ten minutes for 320 minutes
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TRAVNR_TARGET_ACTIONS_TOKEN: ''
+          TRAVNR_CRON_ACCOUNT_KEY: ''
+          TRAVNR_CRON_RELAY_TOKEN: ''
+          DATABASE_URL: ''
+          AERODATABOX_API_KEY: ''
+          RAPIDAPI_KEY: ''
+        run: node nov18-readonly-soak.mjs
+      - name: Preserve content-free observation even on HOLD
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nov18-readonly-scheduler-soak-${{ github.run_id }}
+          path: ${{ runner.temp }}/travnr-readonly-soak.json
+          if-no-files-found: warn
+          retention-days: 14
