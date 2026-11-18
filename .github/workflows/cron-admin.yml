@@ -8,12 +8,12 @@ on:
       operation:
         required: true
         type: choice
-        options: [CREATE_DISABLED, ENABLE_EXACT, DISABLE_EXACT]
+        options: [CREATE_DISABLED, CREATE_DISABLED_PAIR, ENABLE_EXACT, DISABLE_EXACT]
         default: CREATE_DISABLED
       lane:
         required: true
         type: choice
-        options: [CLOCK_ONLY, PRIMARY_BACKSTOP, ROLLING_ROOT]
+        options: [CLOCK_ONLY, PRIMARY_BACKSTOP, ROLLING_ROOT, RECOVERY_PAIR]
         default: CLOCK_ONLY
       job_id:
         type: string
@@ -52,6 +52,7 @@ jobs:
       github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
       github.run_attempt == 1 && inputs.approved_relay_main_sha == github.sha &&
       ((inputs.operation == 'CREATE_DISABLED' && inputs.confirm == 'CREATE_EXACT_DISABLED_MANAGED_CRON_JOB') ||
+      (inputs.operation == 'CREATE_DISABLED_PAIR' && inputs.lane == 'RECOVERY_PAIR' && inputs.confirm == 'CREATE_BOTH_RECOVERY_CRON_JOBS_DISABLED_NO_FORWARD') ||
       (inputs.operation == 'ENABLE_EXACT' && inputs.confirm == 'ENABLE_EXACT_MANAGED_CRON_JOB') ||
       (inputs.operation == 'DISABLE_EXACT' && inputs.confirm == 'DISABLE_EXACT_MANAGED_CRON_JOB'))
     environment: travnr-cron-management
