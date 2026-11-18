@@ -30,7 +30,7 @@ jobs:
         with: {node-version: '22'}
       - run: node --test relay.test.mjs
   independent-pulse:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && inputs.lane == 'CLOCK_ONLY'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && (inputs.lane == 'CLOCK_ONLY' || (vars.TRAVNR_RELAY_MODE == 'CLOCK_ONLY' && vars.TRAVNR_RELAY_PRIMARY_ENABLED != '1' && vars.TRAVNR_RELAY_ROLLING_ENABLED != '1' && vars.TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED != '1' && (inputs.lane == 'PRIMARY_BACKSTOP' || inputs.lane == 'ROLLING_ROOT')))
     runs-on: ubuntu-latest
     timeout-minutes: 4
     steps:
@@ -41,8 +41,8 @@ jobs:
       - run: node cli.mjs
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          TRAVNR_RELAY_MODE: CLOCK_ONLY
-          TRAVNR_RELAY_LANE: CLOCK_ONLY
+          TRAVNR_RELAY_MODE: ${{ inputs.lane == 'CLOCK_ONLY' && 'CLOCK_ONLY' || 'SHADOW_PAIR' }}
+          TRAVNR_RELAY_LANE: ${{ inputs.lane }}
           TRAVNR_TARGET_ACTIONS_TOKEN: ''
           DATABASE_URL: ''
           AERODATABOX_API_KEY: ''
