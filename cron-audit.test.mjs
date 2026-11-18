@@ -37,3 +37,22 @@ test("complete expired pilot proves all nine with 11 API reads",async()=>{const 
 test("missing row cannot report full proof",async()=>{const a=await audit({c,mode:"PILOT",now,...fixture("missing")});assert.equal(a.proven,8);assert.equal(a.unresolved,1);assert.equal(a.fullyProven,false)});
 test("early disabled job is actionable and can never prove full pilot before expiry",async()=>{const a=await audit({c,mode:"PILOT",now:p*1000+180000,...fixture("disabled")});assert.equal(a.disabledEarly,true);assert.equal(a.fullyProven,false)});
 test("recent routine sample cannot be mistaken for full coverage",async()=>{const a=await audit({c,mode:"RECENT",now,...fixture()});assert.equal(a.proven,2);assert.equal(a.ackOnly,7);assert.equal(a.fullyProven,false)});
+
+test("recovery lane config and schedule are independent",()=>{
+ const e={TRAVNR_CRON_PRIMARY_JOB_ID:"234",TRAVNR_CRON_RELAY_SHA:c.pin,TRAVNR_CRON_PRIMARY_START_UTC:c.from,TRAVNR_CRON_PRIMARY_ENABLED_UTC:c.enabledReadback,TRAVNR_CRON_PRIMARY_UNTIL_UTC:c.until};
+ const q=config(e,"RECENT","PRIMARY_BACKSTOP");assert.equal(q.jobId,234);assert.equal(q.lane,"PRIMARY_BACKSTOP");assert.equal(q.title,"Travnr isolated primary expiry recovery");
+ assert(planned(q,"RECENT",now).every(t=>[4,19,34,49].includes(new Date(t*1000).getUTCMinutes())));
+ assert.throws(()=>config(e,"RECENT","ROLLING_ROOT"),/CONFIG/);
+});
+test("recovery acknowledgement cannot certify target collection and skipped is unresolved",()=>{
+ const a=mk(),q={...c,lane:"PRIMARY_BACKSTOP"},run={...a.run,display_title:"TRAVNR EXTERNAL CLOCK PRIMARY_BACKSTOP"},j={...a.jobs.jobs[0],name:"target-forward"},jobs={total_count:1,jobs:[j]};
+ const receipt={...a.receipt,mode:q.lane,status:"TARGET_ACK_AND_RUN_IDENTITY_VERIFIED_NOT_COLLECTION_PROOF",targetRunId:555,targetWorkflow:"phase5-primary-fids-expiry-no-provider.yml",relayDispatches:1};
+ assert.equal(verifyReceipt(q,a.r,101,run,jobs,JSON.stringify(receipt)).status,"RELAY_TARGET_ACK_ONLY");
+ assert.throws(()=>verifyReceipt(q,a.r,101,run,jobs,JSON.stringify({...receipt,targetWorkflow:"other.yml"})),/RECOVERY_TARGET_ACK/);
+ assert.throws(()=>verifyReceipt(q,a.r,101,{...run,display_title:"other"},jobs,JSON.stringify(receipt)),/RUN_IDENTITY/);
+ assert.equal(verifyReceipt(q,a.r,101,run,{total_count:1,jobs:[{...j,conclusion:"skipped",steps:[]}]},null).status,"RELAY_FORWARD_SKIPPED");
+ assert.equal(verifyReceipt(q,a.r,101,run,jobs,JSON.stringify({...receipt,status:"QUARANTINED_PRIOR_RELAY_RUN_REVIEW"})).status,"RELAY_REVIEW_REQUIRED");
+});
+test("pair mode samples at most one detail per lane and never reports full pilot proof",async()=>{
+ const f=fixture(),a=await audit({c,mode:"RECENT",now,sampleLimit:1,...f});assert.equal(a.proven,1);assert.equal(a.ackOnly,8);assert.equal(f.cronCalls.length,3);assert.equal(a.fullyProven,false);
+});
