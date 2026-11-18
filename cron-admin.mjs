@@ -121,6 +121,33 @@ export async function createDisabledPair({until,token,now,jobId,confirm,pin,env}
  return {status:"MANAGED_RECOVERY_PAIR_DISABLED_VERIFIED_NO_FORWARD",jobs:verified,
   until,relayPin:pin,cronMutations:2,...zero};
 }
+/** Renew the same live lease, without enabling, re-keying or changing
+ * cadence. Exact old expiry is a compare-before-write guard, not a remote CAS.
+ * Unknown PATCH outcome requires independent readback, never automatic retry.
+ */
+export async function renewExactLease({lane,until,priorUntil,token,now,jobId,confirm,pin},{request,main,emit=()=>{}}){
+ if(confirm!=="RENEW_ACTIVE_MANAGED_CRON_LEASE_ONLY"||!sha(pin)||!id(jobId)||!["PRIMARY_BACKSTOP","ROLLING_ROOT","CLOCK_ONLY"].includes(lane))HOLD("RENEW_APPROVAL");
+ const old=time(priorUntil),end=time(until);
+ if(!Number.isSafeInteger(now)||old<now+30*60000||old>now+7*86400000||
+    end<=old||end-old>14*86400000||end>now+32*86400000)HOLD("RENEW_BOUNDS");
+ const before=managedSpec({lane,until:priorUntil,token,now}),after=managedSpec({lane,until,token,now});
+ const stable=async()=>{if(await main()!==pin)HOLD("RELAY_MAIN_DRIFT")};
+ await stable();
+ listMatch(await request("GET","/jobs"),before,jobId,now);
+ const live=(await request("GET","/jobs/"+jobId)).jobDetails;
+ if(live?.enabled!==true)HOLD("RENEW_ACTIVE_ONLY");
+ if(live.schedule?.expiresAt===after.schedule.expiresAt){
+  exactManaged(live,after,jobId,true);await stable();
+  return {status:"EXACT_LEASE_ALREADY_RENEWED_NO_WRITE",lane,jobId,priorUntil,until,relayPin:pin,cronMutations:0,...zero};
+ }
+ exactManaged(live,before,jobId,true);
+ await stable();
+ emit({status:"CRON_LEASE_RENEW_ATTEMPT_NO_REPLAY",lane,jobId,priorUntil,until,relayPin:pin});
+ await request("PATCH","/jobs/"+jobId,{job:{schedule:after.schedule}});
+ exactManaged((await request("GET","/jobs/"+jobId)).jobDetails,after,jobId,true);
+ await stable();
+ return {status:"MANAGED_CRON_LEASE_RENEWED_VERIFIED_NOT_EXECUTION_PROOF",lane,jobId,priorUntil,until,relayPin:pin,cronMutations:1,...zero};
+}
 /** The current expiring pilot can be rekeyed locally without changing its
  * job identity, schedule, enabled setting, or relay main. Failed slots
  * remain in history; no attempt is made to repair/backdate them. */
@@ -185,9 +212,9 @@ async function main(){
     e.GITHUB_RUN_ATTEMPT!=="1"||e.GITHUB_SHA!==e.TRAVNR_APPROVED_RELAY_MAIN_SHA||e.TRAVNR_CRON_MANAGEMENT_ENV_READY!=="1")HOLD("EXACT_MAIN_MANUAL_ONLY");
  const jobId=e.TRAVNR_MANAGED_JOB_ID?Number(e.TRAVNR_MANAGED_JOB_ID):null;
  if(pair&&e.TRAVNR_MANAGED_LANE!=="RECOVERY_PAIR")HOLD("PAIR_LANE");
- const cfg={op:e.TRAVNR_MANAGED_OP,lane:e.TRAVNR_MANAGED_LANE,until:e.TRAVNR_MANAGED_UNTIL_UTC,token,now:Date.now(),jobId,
+ const cfg={op:e.TRAVNR_MANAGED_OP,lane:e.TRAVNR_MANAGED_LANE,until:e.TRAVNR_MANAGED_UNTIL_UTC,priorUntil:e.TRAVNR_MANAGED_PRIOR_UNTIL_UTC,token,now:Date.now(),jobId,
   confirm:e.TRAVNR_MANAGED_CONFIRM,pin:e.GITHUB_SHA,env:e};
- const out=await (pair?createDisabledPair:manage)(cfg,{request,main,emit});
+ const out=await (pair?createDisabledPair:cfg.op==="RENEW_EXACT_LEASE"?renewExactLease:manage)(cfg,{request,main,emit});
  console.log(JSON.stringify(out));
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url))main().catch(e=>{console.error(/^HOLD_CRON_(ADMIN|MANAGER)_[A-Z0-9_]+$/.test(e?.message||"")?e.message:"HOLD_CRON_ADMIN_REDACTED_INSPECT_NO_REPLAY");process.exitCode=2});
