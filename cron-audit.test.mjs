@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {PILOT,REPO,WF,config,validateJob,planned,classify,ack,verifyReceipt,samples,audit,observeTargetStep,leaseHealth,shadowConfigs,repairedShadowConfigs,shadowRecentConfigs,auditLanes,SHADOW_ACTIVATION_PIN} from "./cron-audit.mjs";
+import {PILOT,REPO,WF,config,validateJob,planned,classify,ack,verifyReceipt,samples,audit,observeTargetStep,leaseHealth,shadowConfigs,repairedShadowConfigs,shadowRecentConfigs,auditLanes,SHADOW_ACTIVATION_PIN,continuityConfig} from "./cron-audit.mjs";
 const c=PILOT,base="https://api.github.com/repos/"+REPO,url=base+"/actions/workflows/"+WF+"/dispatches";
 const now=Date.parse("2026-11-18T07:56:00Z"),slots=planned(c,"PILOT",now),p=slots[0];
 const row=(s=p,n=1)=>({jobId:c.jobId,datePlanned:s,date:s+1,jitter:1200,identifier:"history-"+n,url,status:1,httpStatus:200});
@@ -143,4 +143,12 @@ test("automatic shadow observation accepts only activation or current code pin, 
  assert.equal(verifyReceipt(q,a.r,101,run,jobs,log).status,"SHADOW_LANE_PROVEN_NO_FORWARD");
  assert.equal(verifyReceipt(q,a.r,101,{...run,head_sha:q.pin},{...jobs,jobs:jobs.jobs.map(j=>({...j,head_sha:q.pin}))},log).status,"SHADOW_LANE_PROVEN_NO_FORWARD");
  assert.throws(()=>verifyReceipt(q,a.r,101,{...run,head_sha:"e".repeat(40)},jobs,log),/RUN_IDENTITY/);
+});
+
+test("routine lease audit advances only fixed existing pair and exact approved expiry at renewal window",()=>{
+ const c={lane:"PRIMARY_BACKSTOP",jobId:8890475,until:"2026-12-19T08:00:00.000Z",leaseContinuity:true};
+ const j={schedule:{expiresAt:20261227080000}},t=Date.parse("2026-12-12T08:00:00Z");
+ assert.equal(continuityConfig(c,j,"RECENT",t).until,"2026-12-27T08:00:00.000Z");
+ assert.equal(continuityConfig(c,j,"SHADOW_RECENT",t).until,"2026-12-27T08:00:00.000Z");
+ for(const [cfg,job,mode,now] of [[{...c,leaseContinuity:false},j,"RECENT",t],[{...c,jobId:1},j,"RECENT",t],[c,j,"SHADOW",t],[c,j,"RECENT",t-1],[c,{schedule:{expiresAt:20261228080000}},"RECENT",t]])assert.equal(continuityConfig(cfg,job,mode,now).until,c.until);
 });
