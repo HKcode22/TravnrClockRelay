@@ -2,7 +2,7 @@ name: Managed isolated Cron provisioning (manual, STOP default)
 on:
   pull_request:
     branches: [main]
-    paths: ['cron-admin.mjs','cron-admin.test.mjs','cron-audit.mjs','.github/workflows/cron-admin.yml']
+    paths: ['cron-admin.mjs','cron-admin.test.mjs','cron-audit.mjs','owner-cron-custody.mjs','owner-cron-custody.test.mjs','.github/workflows/cron-admin.yml']
   workflow_dispatch:
     inputs:
       operation:
@@ -45,7 +45,7 @@ jobs:
         with: {persist-credentials: false}
       - uses: actions/setup-node@v4
         with: {node-version: '22'}
-      - run: node --check cron-admin.mjs && node --test cron-admin.test.mjs
+      - run: node --check cron-admin.mjs && node --check owner-cron-custody.mjs && node --test cron-admin.test.mjs owner-cron-custody.test.mjs
   exact-manual-management:
     if: >-
       github.repository == 'HKcode22/TravnrClockRelay' &&
