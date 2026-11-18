@@ -22,6 +22,9 @@ export async function setupCustody({key,token},{api,secretNames,setSecret,setVar
  const actor=await api("GET","/user");
  if(actor?.login!=="HKcode22"||!id(actor.id))hold("OWNER_IDENTITY");
  await stable();
+ const v=await api("GET",root+"/actions/variables?per_page=100");
+ if(!Number.isSafeInteger(v?.total_count)||v.total_count>100||v.variables?.length!==v.total_count||
+    v.variables.some(x=>x.name==="TRAVNR_CRON_AUDIT_ENABLED"&&x.value==="1"))hold("ROUTINE_AUDIT_NOT_STOPPED");
  const list=await api("GET",root+"/environments?per_page=100");
  if(!Number.isSafeInteger(list?.total_count)||list.total_count>100||list.environments?.length!==list.total_count)hold("ENVIRONMENT_LIST");
  for(const [name,reviewer,allowed] of [[AUDIT,false,[KEY]],[ADMIN,true,[KEY,PAT]]]){
@@ -56,9 +59,7 @@ export async function setupCustody({key,token},{api,secretNames,setSecret,setVar
   emit({stage:"ENVIRONMENT_SECRET_NAMES_VERIFIED",name,mainOnly:true,requiredOwnerReviewer:reviewer,secretNames:allowed});
  }
  await stable();
- const v=await api("GET",root+"/actions/variables?per_page=100");
- if(!Number.isSafeInteger(v?.total_count)||v.total_count>100||v.variables?.length!==v.total_count||
-    v.variables.some(x=>x.name==="TRAVNR_CRON_AUDIT_ENABLED"&&x.value==="1"))hold("ROUTINE_AUDIT_NOT_STOPPED");
+ 
  // Initial post-pilot merge can audit without another manual dispatch. This flag
  // never enables target forwarding or recurring cron mutation.
  await setVar(null,"TRAVNR_CRON_PILOT_AUDIT_AFTER_MERGE","1");
