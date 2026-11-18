@@ -69,19 +69,36 @@ export async function setupCustody({key,token},{api,secretNames,setSecret,setVar
   auditEnvironment:AUDIT,adminEnvironment:ADMIN,automaticPilotAuditOnReviewedMerge:true,
   routineAuditEnabled:false,targetForwardingEnabledByThisScript:false,providerCalls:0,productionDbWrites:0,cronWrites:0};
 }
+// Preserve the owner's actual CLI config lookup, not just HOME. Never
+// inherit the Cron credentials or production environment in the gh child.
+export function ownerGhEnv(e){
+ const out={GH_HOST:"github.com",GH_PROMPT_DISABLED:"1"};
+ for(const k of ["PATH","HOME","GH_CONFIG_DIR","XDG_CONFIG_HOME","GH_TOKEN","GITHUB_TOKEN"])
+  if(typeof e[k]==="string"&&e[k])out[k]=e[k];
+ return out;
+}
+export function ghFailure(e){
+ const stderr=typeof e?.stderr==="string"?e.stderr:"";
+ const http=stderr.match(/\bHTTP (401|403|404|409|422|429|500|502|503|504)\b/);
+ if(http)return "HTTP_"+http[1];
+ if(e?.code==="ETIMEDOUT")return "TIMEOUT";
+ if(e?.code==="ENOENT")return "CLI_MISSING";
+ if(/gh auth login|authentication required|not logged in/i.test(stderr))return "AUTH_REQUIRED";
+ return "UNVERIFIED";
+}
 async function main(){
  const e=process.env;
  if(e.GITHUB_ACTIONS==="true"||e.NODE_TLS_REJECT_UNAUTHORIZED==="0")hold("OWNER_LOCAL_ONLY");
- const env={PATH:e.PATH,HOME:e.HOME,GH_HOST:"github.com",GH_PROMPT_DISABLED:"1",...(e.GH_CONFIG_DIR?{GH_CONFIG_DIR:e.GH_CONFIG_DIR}:{}),...(e.GH_TOKEN?{GH_TOKEN:e.GH_TOKEN}:{})};
- function run(args,input){
-  try{return execFileSync("gh",args,{env,input,encoding:"utf8",timeout:30000,maxBuffer:1048576,stdio:[input===undefined?"ignore":"pipe","pipe","ignore"]}).trim()}
-  catch{hold("GITHUB_OPERATION_UNVERIFIED_INSPECT")}
+ const env=ownerGhEnv(e);
+ function run(label,args,input){
+  try{return execFileSync("gh",args,{env,input,encoding:"utf8",timeout:30000,maxBuffer:1048576,stdio:[input===undefined?"ignore":"pipe","pipe","pipe"]}).trim()}
+  catch(err){console.error(JSON.stringify({status:"OWNER_GITHUB_OPERATION_HOLD",operation:label,reason:ghFailure(err),rawErrorRedacted:true}));hold("GITHUB_OPERATION_UNVERIFIED_INSPECT")}
  }
- const api=async(method,path,body)=>JSON.parse(run(["api","--hostname","github.com","--method",method,"-H","X-GitHub-Api-Version:2022-11-28",path.replace(/^\//,""),...(body?["--input","-"]:[])],body?JSON.stringify(body):undefined));
- const secretNames=async n=>JSON.parse(run(["secret","list","-R",REPO,"--env",n,"--json","name"])).map(x=>x.name);
- const setSecret=async(n,k,value)=>{run(["secret","set",k,"-R",REPO,"--env",n],value)};
- const setVar=async(n,k,value)=>{run(["variable","set",k,"-R",REPO,...(n?["--env",n]:[]),"--body",value])};
- const getVar=async(n,k)=>run(["variable","get",k,"-R",REPO,...(n?["--env",n]:[])]);
+ const api=async(method,path,body)=>JSON.parse(run(method+"_"+(path==="/user"?"USER":path.endsWith("/git/ref/heads/main")?"MAIN":path.includes("/actions/variables")?"REPO_VARIABLES":path.includes("/deployment-branch-policies")?"BRANCH_POLICY": "ENVIRONMENT"),["api","--hostname","github.com","--method",method,"-H","X-GitHub-Api-Version:2022-11-28",path.replace(/^\//,""),...(body?["--input","-"]:[])],body?JSON.stringify(body):undefined));
+ const secretNames=async n=>JSON.parse(run("LIST_SECRET_NAMES",["secret","list","-R",REPO,"--env",n,"--json","name"])).map(x=>x.name);
+ const setSecret=async(n,k,value)=>{run("SET_ENV_SECRET",["secret","set",k,"-R",REPO,"--env",n],value)};
+ const setVar=async(n,k,value)=>{run("SET_VARIABLE",["variable","set",k,"-R",REPO,...(n?["--env",n]:[]),"--body",value])};
+ const getVar=async(n,k)=>run("GET_VARIABLE",["variable","get",k,"-R",REPO,...(n?["--env",n]:[])]);
  const out=await setupCustody({key:e[KEY],token:e[PAT]},{api,secretNames,setSecret,setVar,getVar,emit:x=>console.log(JSON.stringify(x))});
  console.log(JSON.stringify(out));
 }
