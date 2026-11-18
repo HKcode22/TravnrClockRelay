@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {PILOT,REPO,WF,config,validateJob,planned,classify,ack,verifyReceipt,samples,audit,observeTargetStep} from "./cron-audit.mjs";
+import {PILOT,REPO,WF,config,validateJob,planned,classify,ack,verifyReceipt,samples,audit,observeTargetStep,leaseHealth} from "./cron-audit.mjs";
 const c=PILOT,base="https://api.github.com/repos/"+REPO,url=base+"/actions/workflows/"+WF+"/dispatches";
 const now=Date.parse("2026-11-18T07:56:00Z"),slots=planned(c,"PILOT",now),p=slots[0];
 const row=(s=p,n=1)=>({jobId:c.jobId,datePlanned:s,date:s+1,jitter:1200,identifier:"history-"+n,url,status:1,httpStatus:200});
@@ -78,4 +78,19 @@ test("rolling execution requires terminal receipt upload as well as actual prote
  await assert.rejects(observeTargetStep(c,n,get(j)),/TARGET_TERMINAL_RECEIPT_STEP/);
  const good={...j,steps:[...j.steps,{name:"Preserve terminal operational receipt for independently reviewed continuation",conclusion:"success",status:"completed"}]};
  assert.equal((await observeTargetStep(c,n,get(good))).status,"RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF");
+});
+
+test("managed lease audit flags seven-day and 48h renewal thresholds, never authorizes extension",()=>{
+ const end=Date.parse(c.until),d=86400000;
+ assert.equal(leaseHealth(c,"PILOT",end),null);
+ assert.equal(leaseHealth(c,"RECENT",end-8*d).state,"LEASE_CURRENT");
+ assert.equal(leaseHealth(c,"RECENT",end-7*d).state,"RENEWAL_DUE_REVIEW");
+ assert.equal(leaseHealth(c,"RECENT",end-2*d).state,"RENEWAL_CRITICAL");
+ assert.deepEqual(leaseHealth(c,"RECENT",end),{remainingMs:0,state:"EXPIRED"});
+});
+test("reviewed renewal preserves original enable boundary in bounded study audit",()=>{
+ const e={TRAVNR_CRON_PRIMARY_JOB_ID:"234",TRAVNR_CRON_RELAY_SHA:c.pin,TRAVNR_CRON_PRIMARY_START_UTC:c.from,TRAVNR_CRON_PRIMARY_ENABLED_UTC:c.enabledReadback,TRAVNR_CRON_PRIMARY_UNTIL_UTC:"2026-12-28T08:00:00.000Z"};
+ const q=config(e,"RECENT","PRIMARY_BACKSTOP");
+ assert.equal(q.from,c.from);assert.equal(q.enabledReadback,c.enabledReadback);
+ assert.throws(()=>config({...e,TRAVNR_CRON_PRIMARY_UNTIL_UTC:"2027-02-01T00:00:00.000Z"},"RECENT","PRIMARY_BACKSTOP"),/CONFIG_WINDOW/);
 });
