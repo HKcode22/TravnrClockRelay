@@ -1,0 +1,81 @@
+name: Isolate actual recovery-lane GitHub dispatch from Cron transport
+on:
+  pull_request:
+    types: [opened]
+    branches: [main]
+permissions:
+  contents: read
+  actions: write
+concurrency:
+  group: nov18-shadow-failure-isolation-once
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: >-
+      github.repository == 'HKcode22/TravnrClockRelay' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == 'HKcode22' &&
+      github.head_ref == 'review/nov18-shadow-failure-isolation' &&
+      github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: After terminal failed Cron audit, exercise both shadow inputs with the GitHub bot
+        run: |
+          node --input-type=module <<'NODE'
+          const repo="HKcode22/TravnrClockRelay",pin="ed35a5467dda0afc75eda386ad43ee4f401b23c4",auditId=44281886719,wf="external-clock.yml";
+          const root="https://api.github.com/repos/"+repo,headers={Authorization:"Bearer "+process.env.GITHUB_TOKEN,Accept:"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"};
+          const fail=s=>{throw Error("HOLD_SHADOW_ISOLATION_"+s)},id=n=>Number.isSafeInteger(n)&&n>0;
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          let reads=0,posts=0;
+          async function get(path){
+            if(++reads>80)fail("READ_BOUND");
+            const r=await fetch(root+path,{method:"GET",headers,redirect:"error",signal:AbortSignal.timeout(10000)});
+            if(!r.ok)fail("HTTP_"+r.status);return r.json();
+          }
+          async function stable(){if((await get("/git/ref/heads/main")).object?.sha!==pin)fail("MAIN_DRIFT");}
+          function exact(r,n,lane){
+            if(r.id!==n||r.head_sha!==pin||r.head_branch!=="main"||r.event!=="workflow_dispatch"||r.run_attempt!==1||
+               r.path!==".github/workflows/"+wf||r.display_title!=="TRAVNR EXTERNAL CLOCK "+lane)fail("TARGET_IDENTITY");
+          }
+          async function go(){
+            if(process.env.GITHUB_REPOSITORY!==repo||process.env.GITHUB_EVENT_NAME!=="pull_request"||process.env.GITHUB_RUN_ATTEMPT!=="1")fail("SCOPE");
+            await stable();
+            const audit=await get("/actions/runs/"+auditId);
+            if(audit.head_sha!==pin||audit.status!=="completed"||audit.conclusion!=="failure"||audit.run_attempt!==1)fail("NO_TERMINAL_FAILED_AUDIT");
+            const current=await get("/actions/workflows/"+wf+"/runs?branch=main&event=workflow_dispatch&per_page=100");
+            if(current.total_count!==current.workflow_runs?.length||current.total_count>100)fail("HISTORY");
+            if(current.workflow_runs.some(r=>r.head_sha===pin&&r.status!=="completed"))fail("EXISTING_ACTIVE_SHADOW_RUN");
+            // Read-only bot test; neither target nor Cron account token is available.
+            const roots=[];
+            for(const lane of ["PRIMARY_BACKSTOP","ROLLING_ROOT"]){
+              await stable();
+              console.log(JSON.stringify({status:"SHADOW_BOT_DIRECT_ATTEMPT_NOT_CRON_PROOF",lane,atUtc:new Date().toISOString()}));
+              ++posts;
+              const z=await fetch(root+"/actions/workflows/"+wf+"/dispatches",{method:"POST",headers:{...headers,"Content-Type":"application/json"},redirect:"error",signal:AbortSignal.timeout(10000),body:JSON.stringify({ref:"main",return_run_details:true,inputs:{lane}})});
+              if(z.status!==200)fail("ACK_HTTP_"+z.status+"_NO_REPLAY");
+              const a=await z.json(),n=a.workflow_run_id;
+              if(!id(n)||a.run_url!==root+"/actions/runs/"+n||a.html_url!=="https://github.com/"+repo+"/actions/runs/"+n||roots.some(x=>x.id===n))fail("ACK_NO_REPLAY");
+              roots.push({id:n,lane});console.log(JSON.stringify({status:"SHADOW_BOT_DIRECT_ACK_NOT_EXECUTION_PROOF",lane,runId:n}));
+            }
+            const out=[];
+            for(const x of roots){
+              let r;
+              for(let k=0;k<24;k++){r=await get("/actions/runs/"+x.id);exact(r,x.id,x.lane);if(r.status==="completed")break;await sleep(5000)}
+              if(r?.status!=="completed"||r.conclusion!=="success")fail("DIRECT_TARGET_NOT_SUCCESS");
+              const q=await get("/actions/runs/"+x.id+"/jobs?filter=latest&per_page=100");
+              if(q.total_count!==3||q.jobs?.length!==3||new Set(q.jobs.map(j=>j.name)).size!==3||
+                 !q.jobs.every(j=>id(j.id)&&j.run_id===x.id&&j.head_sha===pin&&j.run_attempt===1&&j.status==="completed"))fail("DIRECT_JOB_SCOPE");
+              const m=new Map(q.jobs.map(j=>[j.name,j]));
+              if(!["offline-tests","target-forward"].every(n=>m.get(n)?.conclusion==="skipped"&&(m.get(n).steps==null||m.get(n).steps.length===0)))fail("DIRECT_FORWARD_NOT_SKIPPED");
+              const j=m.get("independent-pulse");
+              if(j?.conclusion!=="success"||j.steps?.filter(s=>s.name==="Run node cli.mjs"&&s.conclusion==="success"&&s.status==="completed").length!==1)fail("DIRECT_STEP");
+              out.push({lane:x.lane,runId:x.id,jobId:j.id});
+            }
+            await stable();
+            console.log(JSON.stringify({status:"DIRECT_GITHUB_SHADOW_LANE_STEPS_VERIFIED_NOT_CRON_PROOF",roots:out,posts,providerCalls:0,databaseWrites:0,targetDispatches:0,paidAuthorityGranted:false}));
+          }
+          try{await go()}catch(e){console.error(/^HOLD_SHADOW_ISOLATION_[A-Z0-9_]+$/.test(e.message)?e.message:"HOLD_SHADOW_ISOLATION_REDACTED_INSPECT_NO_REPLAY");process.exitCode=2}
+          NODE
