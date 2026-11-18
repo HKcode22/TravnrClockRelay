@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {PILOT,REPO,WF,config,validateJob,planned,classify,ack,verifyReceipt,samples,audit,observeTargetStep,leaseHealth,shadowConfigs} from "./cron-audit.mjs";
+import {PILOT,REPO,WF,config,validateJob,planned,classify,ack,verifyReceipt,samples,audit,observeTargetStep,leaseHealth,shadowConfigs,shadowRecentConfigs,SHADOW_ACTIVATION_PIN} from "./cron-audit.mjs";
 const c=PILOT,base="https://api.github.com/repos/"+REPO,url=base+"/actions/workflows/"+WF+"/dispatches";
 const now=Date.parse("2026-11-18T07:56:00Z"),slots=planned(c,"PILOT",now),p=slots[0];
 const row=(s=p,n=1)=>({jobId:c.jobId,datePlanned:s,date:s+1,jitter:1200,identifier:"history-"+n,url,status:1,httpStatus:200});
@@ -110,4 +110,21 @@ test("shadow clock requires actual shadow receipt AND skipped target-forward job
  assert.equal(verifyReceipt(q,a.r,101,run,jobs,log).status,"SHADOW_LANE_PROVEN_NO_FORWARD");
  assert.throws(()=>verifyReceipt(q,a.r,101,run,{total_count:3,jobs:[jobs.jobs[0],{...forward,conclusion:"success"},offline]},log),/SHADOW_FORWARD_NOT_SKIPPED/);
  assert.throws(()=>verifyReceipt(q,a.r,101,run,jobs,a.log),/RECEIPT_COUNT/);
+});
+
+test("automatic shadow audit uses actual pair custody and no forwarding flags",()=>{
+ const env={GITHUB_EVENT_NAME:"schedule",GITHUB_SHA:"d".repeat(40),TRAVNR_RELAY_MODE:"CLOCK_ONLY"};
+ const cs=shadowRecentConfigs(env);assert.equal(cs.length,2);assert.equal(cs[0].jobId,8890475);assert.equal(cs[1].jobId,8890476);
+ assert.equal(cs[0].from,"2026-11-18T10:05:06.006Z");assert.equal(cs[0].activationPin,SHADOW_ACTIVATION_PIN);assert.equal(cs[0].pin,env.GITHUB_SHA);
+ for(const patch of [{GITHUB_EVENT_NAME:"workflow_dispatch"},{TRAVNR_RELAY_MODE:"MULTI_LANE"},{TRAVNR_RELAY_PRIMARY_ENABLED:"1"},{TRAVNR_RELAY_ROLLING_ENABLED:"1"},{TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED:"1"}])assert.throws(()=>shadowRecentConfigs({...env,...patch}),/SHADOW_RECENT_STOP_SCOPE/);
+ const t=Date.parse("2026-11-20T12:00:00Z");assert(planned(cs[0],"SHADOW_RECENT",t).length<=13);assert(planned(cs[1],"SHADOW_RECENT",t).length<=19);
+});
+test("automatic shadow observation accepts only activation or current code pin, still requires no forward",()=>{
+ const a=mk(),q={...c,lane:"PRIMARY_BACKSTOP",shadow:true,shadowRecent:true,activationPin:c.pin,pin:"d".repeat(40)},run={...a.run,display_title:"TRAVNR EXTERNAL CLOCK PRIMARY_BACKSTOP"};
+ const forward={...a.jobs.jobs[0],id:222,name:"target-forward",conclusion:"skipped",steps:[]},offline={...forward,id:223,name:"offline-tests"};
+ const jobs={total_count:3,jobs:[a.jobs.jobs[0],forward,offline]};
+ const log=JSON.stringify({...a.receipt,status:"EXTERNAL_RECOVERY_LANE_SHADOW_OBSERVED_NO_TARGET_DISPATCH",mode:q.lane,relayDispatches:0});
+ assert.equal(verifyReceipt(q,a.r,101,run,jobs,log).status,"SHADOW_LANE_PROVEN_NO_FORWARD");
+ assert.equal(verifyReceipt(q,a.r,101,{...run,head_sha:q.pin},{...jobs,jobs:jobs.jobs.map(j=>({...j,head_sha:q.pin}))},log).status,"SHADOW_LANE_PROVEN_NO_FORWARD");
+ assert.throws(()=>verifyReceipt(q,a.r,101,{...run,head_sha:"e".repeat(40)},jobs,log),/RUN_IDENTITY/);
 });
