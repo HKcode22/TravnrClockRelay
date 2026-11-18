@@ -189,8 +189,21 @@ export function leaseHealth(c,mode,now){
  const remaining=end-now;
  return {remainingMs:Math.max(0,remaining),state:remaining<=0?"EXPIRED":remaining<=48*3600000?"RENEWAL_CRITICAL":remaining<=7*86400000?"RENEWAL_DUE_REVIEW":"LEASE_CURRENT"};
 }
+/** Fixed study-end lease readback tolerance, not extension authority.
+ * Only the exact pair may advance to the predetermined later expiry.
+ * Partial renewal must still surface as a pair-level incident. */
+export function continuityConfig(c,job,mode,now){
+ const old="2026-12-19T08:00:00.000Z",end="2026-12-27T08:00:00.000Z";
+ const exactPair=[["PRIMARY_BACKSTOP",8890475],["ROLLING_ROOT",8890476]].some(([l,n])=>laneOf(c)===l&&c.jobId===n);
+ if(c.leaseContinuity===true&&exactPair&&["RECENT","SHADOW_RECENT"].includes(mode)&&
+    c.until===old&&now>=Date.parse("2026-12-12T08:00:00.000Z")&&job?.schedule?.expiresAt===utcNumber(time(end)))
+  return {...c,until:end};
+ return c;
+}
 export async function audit({c,mode,now,cron,gh,logs,targetGh,sampleLimit=3}){
- const detail=validateJob(c,(await cron("/jobs/"+c.jobId)).jobDetails);
+ const job=(await cron("/jobs/"+c.jobId)).jobDetails;
+ c=continuityConfig(c,job,mode,now);
+ const detail=validateJob(c,job);
  const slots=planned(c,mode,now),h=await cron("/jobs/"+c.jobId+"/history"),{rows,unexpected}=classify(c,slots,h.history);
  const selected=samples(rows,mode,sampleLimit),used=new Set();
  for(const x of selected){
@@ -215,7 +228,7 @@ export async function audit({c,mode,now,cron,gh,logs,targetGh,sampleLimit=3}){
  const bad=safe.filter(x=>!["CLOCK_ONLY_PROVEN","SHADOW_LANE_PROVEN_NO_FORWARD","CRON_HTTP_ACK_ONLY","RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF","RELAY_OBSERVED_DEFER_NO_WORK_PROOF"].includes(x.status));
  const expired=now>=time(c.until)+120000,disabledEarly=now<time(c.until)&&!detail.enabled;
  return {status:"READONLY_CRON_AND_RELAY_AUDIT_NOT_COLLECTION_PROOF",mode,lane:laneOf(c),jobId:c.jobId,relayPin:c.pin,observedUtc:iso(now),auditFirstPlannedUtc:slots.length?iso(slots[0]*1000):null,auditLastPlannedUtc:slots.length?iso(slots.at(-1)*1000):null,expected:slots.length,proven:proven.length,ackOnly:ackOnly.length,relayTargetAcks,relayTargetExecutions,relayDefers,unresolved:bad.length,unexpectedRows:unexpected,over120Seconds:late.length,expired,disabledEarly,
-  leaseHealth:leaseHealth(c,mode,now),
+  leaseHealth:leaseHealth(c,mode,now),leaseUntilUtc:detail.expiresAt,
   shadowFullyProven:mode==="SHADOW"&&c.shadow===true&&slots.length>=(laneOf(c)==="PRIMARY_BACKSTOP"?3:5)&&proven.length===slots.length&&unexpected===0&&late.length===0&&!disabledEarly,
   fullyProven:expired&&mode==="PILOT"&&slots.length>0&&proven.length===slots.length&&unexpected===0,
   timingTargetMet:expired&&mode==="PILOT"&&slots.length>0&&proven.length===slots.length&&unexpected===0&&late.length===0,
@@ -274,7 +287,7 @@ async function main(){
     typeof e.TRAVNR_CRON_ACCOUNT_KEY!=="string"||e.TRAVNR_CRON_ACCOUNT_KEY.length<16)HOLD("SECRET_SCOPE");
  const layout=shadow||shadowRecent?"SHADOW_PAIR":mode==="PILOT"?"CLOCK_ONLY":e.TRAVNR_CRON_AUDIT_LAYOUT||"CLOCK_ONLY";
  if(!["CLOCK_ONLY","RECOVERY_PAIR","SHADOW_PAIR"].includes(layout))HOLD("AUDIT_LAYOUT");
- const configs=shadowRecent?shadowRecentConfigs(e):repaired?repairedShadowConfigs(e.TRAVNR_SHADOW_RECEIPT,e.GITHUB_SHA):shadow?shadowConfigs(e.TRAVNR_SHADOW_RECEIPT,e.GITHUB_SHA):(layout==="RECOVERY_PAIR"?["PRIMARY_BACKSTOP","ROLLING_ROOT"]:["CLOCK_ONLY"]).map(l=>({...config(e,mode,l),...(layout==="RECOVERY_PAIR"?{targetPin:e.TRAVNR_APPROVED_TARGET_MAIN_SHA}:{})}));
+ const configs=(shadowRecent?shadowRecentConfigs(e):repaired?repairedShadowConfigs(e.TRAVNR_SHADOW_RECEIPT,e.GITHUB_SHA):shadow?shadowConfigs(e.TRAVNR_SHADOW_RECEIPT,e.GITHUB_SHA):(layout==="RECOVERY_PAIR"?["PRIMARY_BACKSTOP","ROLLING_ROOT"]:["CLOCK_ONLY"]).map(l=>({...config(e,mode,l),...(layout==="RECOVERY_PAIR"?{targetPin:e.TRAVNR_APPROVED_TARGET_MAIN_SHA}:{})}))).map(c=>({...c,leaseContinuity:e.TRAVNR_LEASE_CONTINUITY_ARMED==="1"&&e.TRAVNR_LEASE_ENV_READY==="1"}));
  if(layout==="RECOVERY_PAIR"&&!configs.every(c=>sha(c.targetPin)))HOLD("TARGET_AUDIT_PIN_REQUIRED");
  if(new Set(configs.map(x=>x.jobId)).size!==configs.length)HOLD("DUPLICATE_AUDIT_JOB");
  const allowed=new Set(configs.map(x=>String(x.jobId))),max=mode==="PILOT"||shadow?15:["RECOVERY_PAIR","SHADOW_PAIR"].includes(layout)?6:5;
@@ -321,13 +334,20 @@ async function main(){
   if(!head.ok||(await head.json()).object?.sha!==e.GITHUB_SHA)HOLD("SHADOW_MAIN_DRIFT");
  }
  const logs=(n,j)=>cli(["run","view",String(n),"-R",REPO,"--job",String(j),"--log"],2*1024*1024);
+ const leaseReadbacks=[];
  for(const c of configs){
   const before=calls;
   try{
    const out=await audit({c,mode,now:Date.now(),cron,gh,logs,targetGh:layout==="RECOVERY_PAIR"?targetGh:undefined,sampleLimit:layout==="RECOVERY_PAIR"||shadowRecent?1:3});
+   leaseReadbacks.push({lane:out.lane,until:out.leaseUntilUtc});
    console.log(JSON.stringify({...out,cronApiReads:calls-before}));
    if(shadow&&!out.shadowFullyProven||shadowRecent&&out.expected>0&&out.proven!==1||out.unresolved||out.unexpectedRows||out.disabledEarly||out.over120Seconds||out.leaseHealth?.state==="RENEWAL_CRITICAL"||out.leaseHealth?.state==="EXPIRED"||(out.expired&&(mode==="RECENT"||!out.fullyProven)))process.exitCode=2;
   }catch(err){console.error(JSON.stringify({status:"AUDIT_LANE_UNVERIFIED",lane:laneOf(c),jobId:c.jobId,reason:/^HOLD_CRON_MANAGER_[A-Z0-9_]+$/.test(err?.message??"")?err.message:"HOLD_CRON_MANAGER_REDACTED",cronApiReads:calls-before}));process.exitCode=2;}
+ }
+ if(configs.length===2&&configs.every(c=>c.leaseContinuity)&&
+   (leaseReadbacks.length!==2||new Set(leaseReadbacks.map(x=>x.until)).size!==1)){
+  console.error(JSON.stringify({status:"HOLD_PAIR_LEASE_CONTINUITY_READBACK_MISMATCH",readbacks:leaseReadbacks,cronWrites:0,targetDispatches:0}));
+  process.exitCode=2;
  }
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url))main().catch(e=>{console.error(/^HOLD_CRON_MANAGER_[A-Z0-9_]+$/.test(e?.message||"")?e.message:"HOLD_CRON_MANAGER_REDACTED");process.exitCode=2});
