@@ -54,7 +54,7 @@ jobs:
       github.ref == 'refs/heads/main' && github.run_attempt == 1 &&
       (github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'schedule' && vars.TRAVNR_CRON_AUDIT_ENABLED == '1'))
-    environment: travnr-cron-audit
+    environment: travnr-cron-management
     runs-on: ubuntu-latest
     timeout-minutes: 6
     steps:
