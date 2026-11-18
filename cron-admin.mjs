@@ -2,7 +2,8 @@
  * Cron account key never passed to relay workers; only relay-only PAT is sent
  * to cron service as destination auth. No production token or database here.
  * No automatic create/enable/rekey/replay. */
-import {resolve} from "node:path";
+import {dirname,isAbsolute,resolve} from "node:path";
+import {existsSync,lstatSync,openSync,writeFileSync,fsyncSync,closeSync} from "node:fs";
 import {execFileSync} from "node:child_process";
 import {fileURLToPath} from "node:url";
 import {PILOT,REPO,WF,validateJob} from "./cron-audit.mjs";
@@ -89,8 +90,8 @@ export async function manage({op,lane,until,token,now,jobId,confirm,pin,env},{re
 /** The current expiring pilot can be rekeyed locally without changing its
  * job identity, schedule, enabled setting, or relay main. Failed slots
  * remain in history; no attempt is made to repair/backdate them. */
-export async function rekeyPilot({token,now},{request,main,emit=()=>{}}){
- if(!tokenOK(token)||!Number.isSafeInteger(now)||now>=time(PILOT.until))HOLD("PILOT_REKEY_SCOPE");
+export async function rekeyPilot({token,now,allowWrite=true},{request,main,emit=()=>{}}){
+ if(!tokenOK(token)||typeof allowWrite!=="boolean"||!Number.isSafeInteger(now)||now>=time(PILOT.until))HOLD("PILOT_REKEY_SCOPE");
  const stable=async()=>{if(await main()!==PILOT.pin)HOLD("PILOT_RELAY_PIN_DRIFT")};
  await stable();
  const p="/jobs/"+PILOT.jobId,prior=(await request("GET",p)).jobDetails;
@@ -98,6 +99,7 @@ export async function rekeyPilot({token,now},{request,main,emit=()=>{}}){
  if(!prev.enabled)HOLD("PILOT_DISABLED_DO_NOT_REENABLE");
  const header=Object.entries(prior.extendedData.headers).find(([k])=>k.toLowerCase()==="authorization")?.[1];
  if(header===fixedHeaders(token).Authorization)return {status:"PILOT_ALREADY_REKEYED_NO_WRITE",jobId:PILOT.jobId,cronMutations:0,...zero};
+ if(!allowWrite)HOLD("PILOT_REKEY_PREVIOUS_ATTEMPT_INSPECT_NO_REPLAY");
  await stable();
  emit({status:"PILOT_REKEY_ATTEMPT_NO_REPLAY",jobId:PILOT.jobId,attemptUtc:iso(Date.now())});
  await request("PATCH",p,{job:{extendedData:{headers:fixedHeaders(token),body:prior.extendedData.body}}});
@@ -127,9 +129,25 @@ async function main(){
   const r=await fetch("https://api.github.com/repos/"+REPO+"/git/ref/heads/main",{method:"GET",headers:{Accept:"application/vnd.github+json",...(auth?{Authorization:"Bearer "+auth}:{})},redirect:"error",signal:AbortSignal.timeout(10000)});
   if(!r.ok)HOLD("RELAY_MAIN_READ");return (await r.json()).object?.sha;
  };
- if(local){if(e.GITHUB_ACTIONS==="true")HOLD("OWNER_LOCAL_ONLY");console.log(JSON.stringify(await rekeyPilot({token,now:Date.now()},{request,main,emit})));return;}
+ if(local){
+  if(e.GITHUB_ACTIONS==="true")HOLD("OWNER_LOCAL_ONLY");
+  const journal=e.TRAVNR_PILOT_REKEY_JOURNAL;
+  if(!journal||!isAbsolute(journal))HOLD("PRIVATE_JOURNAL_REQUIRED");
+  const dir=lstatSync(dirname(journal));
+  if(!dir.isDirectory()||dir.isSymbolicLink()||dir.uid!==process.getuid()||(dir.mode&0o077)!==0)HOLD("PRIVATE_JOURNAL_DIRECTORY");
+  const exists=existsSync(journal);
+  if(exists){const j=lstatSync(journal);if(!j.isFile()||j.isSymbolicLink()||j.uid!==process.getuid()||(j.mode&0o077)!==0||j.size>16384)HOLD("PRIVATE_JOURNAL_FILE");}
+  const journalEmit=x=>{
+   const fd=openSync(journal,"wx",0o600);
+   try{writeFileSync(fd,JSON.stringify(x)+"\n");fsyncSync(fd);}finally{closeSync(fd);}
+   emit(x);
+  };
+  const out=await rekeyPilot({token,now:Date.now(),allowWrite:!exists},{request,main,emit:journalEmit});
+  if(existsSync(journal)){const fd=openSync(journal,"a",0o600);try{writeFileSync(fd,JSON.stringify(out)+"\n");fsyncSync(fd);}finally{closeSync(fd);}}
+  console.log(JSON.stringify(out));return;
+ }
  if(e.GITHUB_ACTIONS!=="true"||e.GITHUB_REPOSITORY!==REPO||e.GITHUB_REF!=="refs/heads/main"||e.GITHUB_EVENT_NAME!=="workflow_dispatch"||
-    e.GITHUB_RUN_ATTEMPT!=="1"||e.GITHUB_SHA!==e.TRAVNR_APPROVED_RELAY_MAIN_SHA)HOLD("EXACT_MAIN_MANUAL_ONLY");
+    e.GITHUB_RUN_ATTEMPT!=="1"||e.GITHUB_SHA!==e.TRAVNR_APPROVED_RELAY_MAIN_SHA||e.TRAVNR_CRON_MANAGEMENT_ENV_READY!=="1")HOLD("EXACT_MAIN_MANUAL_ONLY");
  const jobId=e.TRAVNR_MANAGED_JOB_ID?Number(e.TRAVNR_MANAGED_JOB_ID):null;
  const out=await manage({op:e.TRAVNR_MANAGED_OP,lane:e.TRAVNR_MANAGED_LANE,until:e.TRAVNR_MANAGED_UNTIL_UTC,token,now:Date.now(),jobId,
   confirm:e.TRAVNR_MANAGED_CONFIRM,pin:e.GITHUB_SHA,env:e},{request,main,emit});
