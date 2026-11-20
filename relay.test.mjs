@@ -306,3 +306,23 @@ test("full retention cannot treat prior primary-only success as full cleanup",as
  };
  const q=await runPulse(x.env,x.opts);assert.match(q.status,/NO_CURRENT_MAIN_APPLY_BASELINE/);assert.equal(x.posts(),0);
 });
+
+test("full retention accepts a stale successful dual-job baseline and makes exactly one scoped wake",async()=>{
+ const x=multi("PRIMARY_BACKSTOP");x.env.TRAVNR_RELAY_FULL_RETENTION_APPROVED="1";
+ const get=x.opts.fetcher;
+ x.opts.fetcher=async(url,init)=>{
+  if(url.includes("/actions/runs/111/jobs")){
+   const z=await get(url,init),v=await z.json();
+   return wrap({total_count:2,jobs:[...v.jobs,{...v.jobs[0],id:v.jobs[0].id+100,name:"phase7-expiry",steps:[{name:"Bounded derived research and temporary link due-only expiry",status:"completed",conclusion:"success"}]}]});
+  }
+  if(url===root+TARGET+"/actions/runs/201")return wrap({...row(201,PRIMARY,SHA,"queued"),display_title:FULL_RETENTION_TITLE});
+  return get(url,init);
+ };
+ const q=await runPulse(x.env,x.opts);
+ assert.equal(q.targetRunId,201);assert.equal(x.body().inputs.confirm,FULL_RETENTION_CONFIRM);assert.equal(x.posts(),1);
+});
+test("full retention refuses a scheduled baseline without successful research sibling",async()=>{
+ const x=multi("PRIMARY_BACKSTOP");x.env.TRAVNR_RELAY_FULL_RETENTION_APPROVED="1";
+ const q=await runPulse(x.env,x.opts);
+ assert.match(q.reason,/FULL_RETENTION_RESEARCH_STEP/);assert.equal(x.posts(),0);
+});
