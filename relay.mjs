@@ -8,6 +8,8 @@ export const ROLLING="phase6-rolling-controller-bounded-session.yml";
 export const DIRECT="phase6-direct-recovery-tick.yml";
 export const DIRECT_TITLE="P6 DIRECT RECOVERY TICK";
 export const DIRECT_VERIFY_TITLE="P6 DIRECT RECOVERY VERIFY";
+export const FULL_RETENTION_CONFIRM="APPLY_REVIEWED_FULL_RETENTION_BACKSTOP_NO_PROVIDER";
+export const FULL_RETENTION_TITLE="P5 FULL RETENTION BACKSTOP CHILD";
 export const DIRECT_VERIFY_CONFIRM="VERIFY_DIRECT_RECOVERY_CLOCK_NO_PROVIDER_NO_DB_NO_DISPATCH";
 export const DIRECT_CONFIRM="RUN_ONE_REVIEWED_DIRECT_RECOVERY_TICK_AFTER_SEPARATE_PHASE6_GO";
 const ROOT="https://api.github.com/repos/",SELF="external-clock.yml",MIN=60000;
@@ -243,6 +245,10 @@ export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep
   }
 
   let inputs,rootScope=null,directUntil=null;
+  const fullRetention=mode==="PRIMARY_BACKSTOP"&&env.TRAVNR_RELAY_FULL_RETENTION_APPROVED==="1";
+  if(fullRetention&&!multi)HOLD("FULL_RETENTION_REQUIRES_SEPARATE_MULTI_LANE");
+  if(mode==="PRIMARY_BACKSTOP"&&!["","0","1"].includes(env.TRAVNR_RELAY_FULL_RETENTION_APPROVED??""))HOLD("FULL_RETENTION_MODE");
+
   if(direct){
    // Same single external wake and single POST; no dynamic root/custody
    // mutation, no new Cron lease and no production secrets at the relay.
@@ -290,7 +296,7 @@ export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep
    if(!Number.isSafeInteger(p?.total_count)||p.total_count<0||!Array.isArray(p.workflow_runs)||
       p.workflow_runs.length!==Math.min(20,p.total_count))HOLD("PRIMARY_HISTORY");
    const eligible=p.workflow_runs.map(r=>exact(r,wf,TARGET)).filter(r=>r.head_sha===env.TRAVNR_APPROVED_TARGET_MAIN_SHA&&
-     (r.event==="schedule"||r.event==="workflow_dispatch"&&r.display_title==="P5 PRIMARY BACKSTOP CHILD"))
+     (r.event==="schedule"||r.event==="workflow_dispatch"&&r.display_title===(fullRetention?FULL_RETENTION_TITLE:"P5 PRIMARY BACKSTOP CHILD"))&&(!fullRetention||Date.parse(r.created_at)>=since))
      .sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)||b.id-a.id);
    if(!eligible.length){
     // A fresh, separately selected exact VERIFY receipt is only a bounded
@@ -315,9 +321,16 @@ export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep
    const good=js.filter(j=>j.name==="primary-fids-expiry"&&j.run_id===last.id&&j.head_sha===last.head_sha&&j.run_attempt===1&&j.status==="completed"&&j.conclusion==="success"&&
      j.steps?.filter(s=>s.name==="Verify exact main and execute only bounded primary FIDS expiry"&&s.status==="completed"&&s.conclusion==="success").length===1);
    if(good.length!==1||!Number.isFinite(Date.parse(good[0].completed_at))||Date.parse(good[0].completed_at)>now())HOLD("PRIMARY_STEP");
-   if(now()-Date.parse(good[0].completed_at)<20*MIN)return result("DEFER_RECENT_PRIMARY_STEP_NOT_DELETION_PROOF",clock);
+   let lastDone=Date.parse(good[0].completed_at);
+   if(fullRetention){
+    const research=js.filter(j=>j.name==="phase7-expiry"&&j.run_id===last.id&&j.head_sha===last.head_sha&&j.run_attempt===1&&j.status==="completed"&&j.conclusion==="success"&&
+      j.steps?.filter(s=>s.name==="Bounded derived research and temporary link due-only expiry"&&s.status==="completed"&&s.conclusion==="success").length===1);
+    if(research.length!==1||!Number.isFinite(Date.parse(research[0].completed_at))||Date.parse(research[0].completed_at)>now())HOLD("FULL_RETENTION_RESEARCH_STEP");
+    lastDone=Math.min(lastDone,Date.parse(research[0].completed_at));
    }
-   inputs={confirm:"APPLY_REVIEWED_PRIMARY_FIDS_BACKSTOP_NO_PRIVATE_MUTATION",approved_main_sha:env.TRAVNR_APPROVED_TARGET_MAIN_SHA};
+   if(now()-lastDone<(fullRetention?10:20)*MIN)return result("DEFER_RECENT_PRIMARY_STEP_NOT_DELETION_PROOF",clock);
+   }
+   inputs={confirm:fullRetention?FULL_RETENTION_CONFIRM:"APPLY_REVIEWED_PRIMARY_FIDS_BACKSTOP_NO_PRIVATE_MUTATION",approved_main_sha:env.TRAVNR_APPROVED_TARGET_MAIN_SHA};
 
   }else if(direct){
    inputs={confirm:verify?DIRECT_VERIFY_CONFIRM:DIRECT_CONFIRM,approved_main_sha:env.TRAVNR_APPROVED_TARGET_MAIN_SHA};
@@ -374,7 +387,7 @@ export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep
    exact(live,wf,TARGET);
    if(live.id!==rid||live.head_sha!==env.TRAVNR_APPROVED_TARGET_MAIN_SHA||live.event!=="workflow_dispatch")HOLD("ACK_READBACK_IMMUTABLE_DRIFT");
    if(live.status==="completed"&&live.conclusion!=="success")HOLD("ACK_TARGET_TERMINAL_FAILURE_REVIEW");
-   if(direct&&live.display_title!==expectedDirectTitle){
+   if((direct&&live.display_title!==expectedDirectTitle)||(fullRetention&&live.display_title!==FULL_RETENTION_TITLE)){
     if(i===3||live.status==="completed")HOLD("ACK_READBACK_TITLE_DRIFT");
     emit({status:"EXTERNAL_WAKE_ACK_ACTIVE_TITLE_PENDING_GET_ONLY",mode,relayRunId:runId,targetRunId:rid,attempt:i+1});
     await sleep(3000);continue;

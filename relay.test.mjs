@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {runPulse,rootInputs,cronJobSpec,readPrimaryVerifyLog,verifyPrimaryBootstrapReceipt,provesNoTargetStep,directTargetDisposition,RELAY,TARGET,PILOT,PRIMARY,ROLLING,DIRECT,DIRECT_TITLE,DIRECT_CONFIRM,DIRECT_VERIFY_TITLE,DIRECT_VERIFY_CONFIRM} from "./relay.mjs";
+import {runPulse,rootInputs,cronJobSpec,readPrimaryVerifyLog,verifyPrimaryBootstrapReceipt,provesNoTargetStep,directTargetDisposition,RELAY,TARGET,PILOT,PRIMARY,ROLLING,DIRECT,DIRECT_TITLE,DIRECT_CONFIRM,DIRECT_VERIFY_TITLE,DIRECT_VERIFY_CONFIRM,FULL_RETENTION_CONFIRM,FULL_RETENTION_TITLE} from "./relay.mjs";
 const NOW=Date.parse("2026-11-18T06:00:00.000Z"),SHA="a".repeat(40),LOCAL="b".repeat(40);
 const tok="github_pat_"+ "x".repeat(30),root="https://api.github.com/repos/";
 const wrap=(data,status=200)=>({status,ok:status===200,json:async()=>data});
@@ -289,4 +289,40 @@ test("two-job primary receipt rejects incomplete, duplicate, drifted, or partial
   assert.throws(()=>verifyPrimaryBootstrapReceipt(bootRow,{total_count:rows.length,jobs:rows},log,SHA,202,NOW),/PRIMARY_BOOTSTRAP_VERIFY/);
  }
  assert.throws(()=>verifyPrimaryBootstrapReceipt(bootRow,{total_count:2,jobs:[bootJob]},log,SHA,202,NOW),/PRIMARY_BOOTSTRAP_VERIFY/);
+});
+
+test("separate full retention scope defaults OFF; no legacy single-lane broadening",async()=>{
+ const x=f("PRIMARY_BACKSTOP");x.env.TRAVNR_RELAY_FULL_RETENTION_APPROVED="1";
+ assert.match((await runPulse(x.env,x.opts)).status,/PREFLIGHT_DEFERRED/);
+ assert.equal(x.posts(),0);
+});
+test("full retention cannot treat prior primary-only success as full cleanup",async()=>{
+ const x=multi("PRIMARY_BACKSTOP");x.env.TRAVNR_RELAY_FULL_RETENTION_APPROVED="1";
+ const get=x.opts.fetcher;
+ x.opts.fetcher=async(url,init)=>{const z=await get(url,init);
+  if(url.includes("/actions/workflows/"+PRIMARY+"/runs?branch=main&per_page=20")&&init?.method!=="POST"){
+   const raw=await z.json();return {ok:true,status:200,json:async()=>({...raw,workflow_runs:raw.workflow_runs.map(r=>({...r,event:"workflow_dispatch",display_title:"P5 PRIMARY BACKSTOP CHILD"}))})};
+  }return z;
+ };
+ const q=await runPulse(x.env,x.opts);assert.match(q.status,/NO_CURRENT_MAIN_APPLY_BASELINE/);assert.equal(x.posts(),0);
+});
+
+test("full retention accepts a stale successful dual-job baseline and makes exactly one scoped wake",async()=>{
+ const x=multi("PRIMARY_BACKSTOP");x.env.TRAVNR_RELAY_FULL_RETENTION_APPROVED="1";
+ const get=x.opts.fetcher;
+ x.opts.fetcher=async(url,init)=>{
+  if(url.includes("/actions/runs/111/jobs")){
+   const z=await get(url,init),v=await z.json();
+   return wrap({total_count:2,jobs:[...v.jobs,{...v.jobs[0],id:v.jobs[0].id+100,name:"phase7-expiry",steps:[{name:"Bounded derived research and temporary link due-only expiry",status:"completed",conclusion:"success"}]}]});
+  }
+  if(url===root+TARGET+"/actions/runs/201")return wrap({...row(201,PRIMARY,SHA,"queued"),display_title:FULL_RETENTION_TITLE});
+  return get(url,init);
+ };
+ const q=await runPulse(x.env,x.opts);
+ assert.equal(q.targetRunId,201);assert.equal(x.body().inputs.confirm,FULL_RETENTION_CONFIRM);assert.equal(x.posts(),1);
+});
+test("full retention refuses a scheduled baseline without successful research sibling",async()=>{
+ const x=multi("PRIMARY_BACKSTOP");x.env.TRAVNR_RELAY_FULL_RETENTION_APPROVED="1";
+ const q=await runPulse(x.env,x.opts);
+ assert.match(q.reason,/FULL_RETENTION_RESEARCH_STEP/);assert.equal(x.posts(),0);
 });
