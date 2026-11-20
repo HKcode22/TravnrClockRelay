@@ -30,7 +30,13 @@ function f(mode,fault=""){
   }
   if(url===root+TARGET+"/git/ref/heads/main")return wrap({object:{sha:fault==="drift"?LOCAL:SHA}});
   if(url===root+TARGET+"/actions/runs/202")return wrap(bootRow);
-  if(url===root+TARGET+"/actions/runs/202/jobs?filter=latest&per_page=100")return wrap({total_count:1,jobs:[bootJob]});
+  if(url===root+TARGET+"/actions/runs/202/jobs?filter=latest&per_page=100"){
+   if(["twoJobVerify","executedSibling","unknownSibling"].includes(fault)){
+    const sibling={...bootJob,id:1203,name:fault==="unknownSibling"?"other-job":"phase7-expiry",conclusion:fault==="executedSibling"?"success":"skipped",steps:fault==="executedSibling"?bootJob.steps:[]};
+    return wrap({total_count:2,jobs:[sibling,bootJob]});
+   }
+   return wrap({total_count:1,jobs:[bootJob]});
+  }
   if(url===root+TARGET+"/actions/jobs/1202/logs"){
    assert.equal(init.redirect,"manual");assert(init.headers.Authorization.startsWith("Bearer "));
    return new Response("",{status:302,headers:{Location:fault==="evilHost"?"https://untrusted.example/log":"https://logs.blob.core.windows.net/log?sig=fixture"}});
@@ -65,7 +71,7 @@ function f(mode,fault=""){
   if(url.includes("/actions/runs/112/jobs"))return wrap({total_count:2,jobs:[{id:501,name:"one-protected-bounded-session",run_id:112,head_sha:SHA,run_attempt:1,status:"completed",conclusion:fault==="skip"?"skipped":"success",steps:fault==="skip"?[]:[{name:"Execute one protected rolling session"}]},{id:502,name:"offline-bounded-session-reconciliation",run_id:112,head_sha:SHA,run_attempt:1,status:"completed",conclusion:"skipped",steps:[]}]});
   if(url.includes("/actions/runs/111/jobs"))return wrap({total_count:1,jobs:[{name:"primary-fids-expiry",run_id:111,head_sha:SHA,run_attempt:1,status:"completed",conclusion:"success",completed_at:new Date(NOW-(fault==="recent"?5:40)*60000).toISOString(),steps:[{name:"Verify exact main and execute only bounded primary FIDS expiry",status:"completed",conclusion:"success"}]}]});
   if(url.includes("&status="))return wrap({total_count:fault==="active"?1:0,workflow_runs:fault==="active"?[row(301,wf,SHA,"queued")]:[]});
-  if(url.includes("per_page=20"))return wrap({total_count:1,workflow_runs:[{...row(111,wf),event:["verifyOnly","coldStart","evilHost","notZero"].includes(fault)?"workflow_dispatch":"schedule"}]});
+  if(url.includes("per_page=20"))return wrap({total_count:1,workflow_runs:[{...row(111,wf),event:["verifyOnly","coldStart","evilHost","notZero","twoJobVerify","executedSibling","unknownSibling"].includes(fault)?"workflow_dispatch":"schedule"}]});
   if(url.includes("&created="))return wrap({total_count:["window","skip","partial","failedRoot"].includes(fault)?1:0,workflow_runs:["window","skip","partial","failedRoot"].includes(fault)?[{...row(112,wf),conclusion:fault==="failedRoot"?"failure":"success"}]:[]});
   throw Error("unexpected request");
  };
@@ -262,4 +268,25 @@ test("a pending direct title followed by terminal target failure remains quarant
   n++;return wrap(n===1?{...row(201,DIRECT,SHA,"queued"),display_title:"pending"}:{...row(201,DIRECT),display_title:DIRECT_TITLE,conclusion:"failure"});
  }return get(url,init);};
  await assert.rejects(runPulse(x.env,x.opts),/ACK_TARGET_TERMINAL_FAILURE_REVIEW_NO_BLIND_REPLAY/);assert.equal(x.posts(),1);assert.equal(n,2);
+});
+
+test("two-job primary VERIFY selects named primary log regardless of job order",async()=>{
+ const x=f("PRIMARY_BACKSTOP","twoJobVerify");x.env.TRAVNR_RELAY_PRIMARY_VERIFY_RUN_ID="202";
+ assert.equal((await runPulse(x.env,x.opts)).targetRunId,201);assert.equal(x.posts(),1);
+ assert(x.events.some(e=>e.status==="EXTERNAL_FIRST_PRIMARY_WAKE_FROM_EXACT_VERIFY_NOT_APPLY_FRESHNESS"));
+});
+test("executed or unknown research sibling cannot bootstrap primary dispatch",async()=>{
+ for(const fault of ["executedSibling","unknownSibling"]){
+  const x=f("PRIMARY_BACKSTOP",fault);x.env.TRAVNR_RELAY_PRIMARY_VERIFY_RUN_ID="202";
+  assert.match((await runPulse(x.env,x.opts)).status,/PREFLIGHT_DEFERRED/);assert.equal(x.posts(),0);
+ }
+});
+test("two-job primary receipt rejects incomplete, duplicate, drifted, or partially executed sibling",()=>{
+ const sibling={...bootJob,id:1203,name:"phase7-expiry",conclusion:"skipped",steps:[]};
+ const log=JSON.stringify(bootStatus);
+ assert.equal(verifyPrimaryBootstrapReceipt(bootRow,{total_count:2,jobs:[sibling,bootJob]},log,SHA,202,NOW).verifiedJobId,1202);
+ for(const rows of [[bootJob,{...sibling,head_sha:LOCAL}],[bootJob,{...sibling,id:bootJob.id}],[bootJob,{...sibling,run_attempt:2}],[bootJob,{...sibling,steps:[{name:"unexpected",conclusion:"skipped"}]}],[bootJob,sibling,{...sibling,id:1204}]]){
+  assert.throws(()=>verifyPrimaryBootstrapReceipt(bootRow,{total_count:rows.length,jobs:rows},log,SHA,202,NOW),/PRIMARY_BOOTSTRAP_VERIFY/);
+ }
+ assert.throws(()=>verifyPrimaryBootstrapReceipt(bootRow,{total_count:2,jobs:[bootJob]},log,SHA,202,NOW),/PRIMARY_BOOTSTRAP_VERIFY/);
 });

@@ -63,17 +63,33 @@ export async function readPrimaryVerifyLog(fetcher,token,jobId){
  finally{await reader.cancel().catch(()=>{});reader.releaseLock();}
  return log;
 }
+/** A primary VERIFY may have one legacy job or one additional, demonstrably
+ * skipped research-expiry job. No other job or executed sibling is admissible.
+ * This selects a log only; receipt validation remains mandatory. */
+function primaryVerifyJob(run,jobs){
+ const rows=jobs?.jobs;
+ if(!Array.isArray(rows)||jobs.total_count!==rows.length||![1,2].includes(rows.length)||
+    new Set(rows.map(j=>j.id)).size!==rows.length||
+    !rows.every(j=>id(j.id)&&j.run_id===run.id&&j.head_sha===run.head_sha&&j.run_attempt===1&&j.status==="completed"))
+  HOLD("PRIMARY_BOOTSTRAP_VERIFY_JOB_SET");
+ const primary=rows.filter(j=>j.name==="primary-fids-expiry");
+ if(primary.length!==1||primary[0].conclusion!=="success"||
+    !Array.isArray(primary[0].steps)||primary[0].steps.filter(s=>s.name===PRIMARY_STEP&&s.status==="completed"&&s.conclusion==="success").length!==1)
+  HOLD("PRIMARY_BOOTSTRAP_VERIFY_JOB");
+ if(rows.length===2){
+  const sibling=rows.find(j=>j!==primary[0]);
+  if(sibling.name!=="phase7-expiry"||sibling.conclusion!=="skipped"||
+     !(sibling.steps==null||Array.isArray(sibling.steps)&&sibling.steps.length===0))
+   HOLD("PRIMARY_BOOTSTRAP_VERIFY_SIBLING");
+ }
+ return primary[0];
+}
 /** Reuse the existing owner's exact VERIFY-only receipt semantics for the
  * first backstop wake after a reviewed main transition. Not APPLY cadence. */
 export function verifyPrimaryBootstrapReceipt(run,jobs,log,expectedSha,runId,clock){
  if(run?.id!==runId||run.head_sha!==expectedSha||run.path!==".github/workflows/"+PRIMARY||run.head_branch!=="main"||
-    run.event!=="workflow_dispatch"||run.run_attempt!==1||run.status!=="completed"||run.conclusion!=="success"||
-    jobs?.total_count!==1||jobs.jobs?.length!==1)HOLD("PRIMARY_BOOTSTRAP_VERIFY_IDENTITY");
- const j=jobs.jobs[0];
- if(!id(j.id)||j.name!=="primary-fids-expiry"||j.run_id!==runId||j.head_sha!==expectedSha||j.run_attempt!==1||
-    j.status!=="completed"||j.conclusion!=="success"||
-    j.steps?.filter(s=>s.name===PRIMARY_STEP&&s.status==="completed"&&s.conclusion==="success").length!==1)
-  HOLD("PRIMARY_BOOTSTRAP_VERIFY_JOB");
+    run.event!=="workflow_dispatch"||run.run_attempt!==1||run.status!=="completed"||run.conclusion!=="success")HOLD("PRIMARY_BOOTSTRAP_VERIFY_IDENTITY");
+ const j=primaryVerifyJob(run,jobs);
  const hits=String(log).split(/\r?\n/).filter(l=>l.includes('{"status":"PRIMARY_FIDS_VERIFY_ONLY_NO_WRITES"'));
  if(hits.length!==1)HOLD("PRIMARY_BOOTSTRAP_VERIFY_RECEIPT_COUNT");
  let r;try{r=JSON.parse(hits[0].slice(hits[0].indexOf('{"status":"PRIMARY_FIDS_VERIFY_ONLY_NO_WRITES"')).trim());}
@@ -286,9 +302,10 @@ export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep
     const vr=exact(await get(TARGET,"/actions/runs/"+verifyId),wf,TARGET);
     const vj=await get(TARGET,"/actions/runs/"+verifyId+"/jobs?filter=latest&per_page=100");
     if(vr.head_sha!==env.TRAVNR_APPROVED_TARGET_MAIN_SHA||vr.status!=="completed"||vr.conclusion!=="success"||
-       vj?.total_count!==1||vj.jobs?.length!==1||!id(vj.jobs[0].id))HOLD("PRIMARY_BOOTSTRAP_VERIFY_SCOPE");
+       vr.event!=="workflow_dispatch"||vr.run_attempt!==1)HOLD("PRIMARY_BOOTSTRAP_VERIFY_SCOPE");
+    const primary=primaryVerifyJob(vr,vj);
     reads+=2;if(reads>40||now()-start>120000)HOLD("READ_BOUND");
-    const log=await readPrimaryVerifyLog(fetcher,env.TRAVNR_TARGET_ACTIONS_TOKEN,vj.jobs[0].id);
+    const log=await readPrimaryVerifyLog(fetcher,env.TRAVNR_TARGET_ACTIONS_TOKEN,primary.id);
     const proof=verifyPrimaryBootstrapReceipt(vr,vj,log,env.TRAVNR_APPROVED_TARGET_MAIN_SHA,verifyId,now());
     emit({status:"EXTERNAL_FIRST_PRIMARY_WAKE_FROM_EXACT_VERIFY_NOT_APPLY_FRESHNESS",...proof});
    }else{
