@@ -6,7 +6,10 @@ import {resolve} from "node:path";
 import {fileURLToPath} from "node:url";
 import {ACTUAL_PAIR,LANES,managedSpec,exactManaged} from "./cron-admin.mjs";
 import {REPO,WF,PILOT} from "./cron-audit.mjs";
-export const OLD="2026-12-19T08:00:00.000Z",EXTENDED="2026-12-27T08:00:00.000Z";
+// Monday stage: POST outcome tail 2026-12-29T04:00:00Z. Keep both existing
+// clock leases live through the tail plus 28 hours for the last FIDS expiry
+// and bounded readback. This does not extend the signed source/collection window.
+export const OLD="2026-12-19T08:00:00.000Z",EXTENDED="2026-12-30T08:00:00.000Z";
 export const RENEW_FROM="2026-12-12T08:00:00.000Z",RENEW_LAST="2026-12-19T07:30:00.000Z";
 const HOL=s=>{throw Error("HOLD_LEASE_CONTINUITY_"+s)},sha=s=>typeof s==="string"&&/^[a-f0-9]{40}$/.test(s),id=x=>Number.isSafeInteger(x)&&x>0;
 const zero={providerCalls:0,databaseWrites:0,targetDispatches:0,paidAuthorityGranted:false};
