@@ -147,10 +147,10 @@ test("automatic shadow observation accepts only activation or current code pin, 
 
 test("routine lease audit advances only fixed existing pair and exact approved expiry at renewal window",()=>{
  const c={lane:"PRIMARY_BACKSTOP",jobId:8890475,until:"2026-12-19T08:00:00.000Z",leaseContinuity:true};
- const j={schedule:{expiresAt:20261227080000}},t=Date.parse("2026-12-12T08:00:00Z");
- assert.equal(continuityConfig(c,j,"RECENT",t).until,"2026-12-27T08:00:00.000Z");
- assert.equal(continuityConfig(c,j,"SHADOW_RECENT",t).until,"2026-12-27T08:00:00.000Z");
- for(const [cfg,job,mode,now] of [[{...c,leaseContinuity:false},j,"RECENT",t],[{...c,jobId:1},j,"RECENT",t],[c,j,"SHADOW",t],[c,j,"RECENT",t-1],[c,{schedule:{expiresAt:20261228080000}},"RECENT",t]])assert.equal(continuityConfig(cfg,job,mode,now).until,c.until);
+ const j={schedule:{expiresAt:20261230080000}},t=Date.parse("2026-12-12T08:00:00Z");
+ assert.equal(continuityConfig(c,j,"RECENT",t).until,"2026-12-30T08:00:00.000Z");
+ assert.equal(continuityConfig(c,j,"SHADOW_RECENT",t).until,"2026-12-30T08:00:00.000Z");
+ for(const [cfg,job,mode,now] of [[c,{schedule:{expiresAt:20261227080000}},"RECENT",t],[{...c,leaseContinuity:false},j,"RECENT",t],[{...c,jobId:1},j,"RECENT",t],[c,j,"SHADOW",t],[c,j,"RECENT",t-1],[c,{schedule:{expiresAt:20261228080000}},"RECENT",t]])assert.equal(continuityConfig(cfg,job,mode,now).until,c.until);
 });
 
 test("direct target audit distinguishes a reconciled wave from green preflight HOLD",async()=>{
