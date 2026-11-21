@@ -141,7 +141,7 @@ function verifyRecoveryOutput(c,r,n,run,j,log){
   return {status:"RELAY_TARGET_ACK_ONLY",...result,targetRunId:x.targetRunId};
  }
  const benign=["DEFER_TARGET_ALREADY_ACTIVE","DEFER_RECENT_PRIMARY_STEP_NOT_DELETION_PROOF","DEFER_OUTSIDE_OR_LATE_POLICY_WINDOW",...(laneOf(c)==="ROLLING_ROOT"&&(c.directTick===true||c.directVerify===true)?["DEFER_RECENT_DIRECT_TICK_NOT_COLLECTION_PROOF"]:[])];
- const review=["DEFER_SEPARATE_LANE_OFF","QUARANTINED_PRIOR_RELAY_RUN_REVIEW","DEFER_NO_CURRENT_MAIN_APPLY_BASELINE_REVIEW","DEFER_CURRENT_WINDOW_CUSTODY_REVIEW_NO_REPLAY",...(laneOf(c)==="ROLLING_ROOT"&&(c.directTick===true||c.directVerify===true)?["DEFER_DIRECT_PRIOR_ATTEMPT_REVIEW_NO_REPLAY"]:[])];
+ const review=["DEFER_SEPARATE_LANE_OFF","QUARANTINED_PRIOR_RELAY_RUN_REVIEW","DEFER_NO_CURRENT_MAIN_APPLY_BASELINE_REVIEW","DEFER_NO_CURRENT_MAIN_FULL_RETENTION_APPLY_BASELINE_REVIEW","DEFER_CURRENT_WINDOW_CUSTODY_REVIEW_NO_REPLAY",...(laneOf(c)==="ROLLING_ROOT"&&(c.directTick===true||c.directVerify===true)?["DEFER_DIRECT_PRIOR_ATTEMPT_REVIEW_NO_REPLAY"]:[])];
  if(benign.includes(x.status))return {status:"RELAY_OBSERVED_DEFER_NO_WORK_PROOF",...result};
  if(review.includes(x.status))return {status:"RELAY_REVIEW_REQUIRED",...result};
  HOLD("RECOVERY_UNKNOWN_DISPOSITION");
@@ -158,17 +158,30 @@ export async function observeTargetStep(c,targetRunId,targetGh){
  const r=await targetGh("/actions/runs/"+targetRunId);
  if(r?.id!==targetRunId||r.head_sha!==c.targetPin||r.head_branch!=="main"||r.event!=="workflow_dispatch"||
     r.path!==".github/workflows/"+workflow||r.run_attempt!==1||direct&&r.display_title!==(verify?"P6 DIRECT RECOVERY VERIFY":"P6 DIRECT RECOVERY TICK"))HOLD("TARGET_RUN_IDENTITY");
+ const full=primary&&r.display_title==="P5 FULL RETENTION BACKSTOP CHILD";
+ if(primary&&!full&&r.display_title!=="P5 PRIMARY BACKSTOP CHILD")HOLD("TARGET_PRIMARY_TITLE");
  if(!["completed","queued","in_progress","waiting","requested","pending"].includes(r.status))HOLD("TARGET_STATUS");
  if(r.status!=="completed")return {status:"RELAY_TARGET_PENDING_EXECUTION",targetRunId,targetStatus:r.status};
  if(r.conclusion!=="success")return {status:"RELAY_TARGET_TERMINAL_FAILURE",targetRunId,targetConclusion:r.conclusion};
  const jobs=await targetGh("/actions/runs/"+targetRunId+"/jobs?filter=latest&per_page=100");
- if(!Array.isArray(jobs?.jobs)||jobs.total_count!==jobs.jobs.length||jobs.total_count!==(primary?1:direct?3:2)||
+ if(!Array.isArray(jobs?.jobs)||jobs.total_count!==jobs.jobs.length||(primary?(full?jobs.total_count!==2:![1,2].includes(jobs.total_count)):jobs.total_count!==(direct?3:2))||
     new Set(jobs.jobs.map(j=>j.id)).size!==jobs.jobs.length||
     !jobs.jobs.every(j=>id(j.id)&&j.run_id===targetRunId&&j.head_sha===c.targetPin&&j.run_attempt===1&&j.status==="completed"))HOLD("TARGET_JOBS");
  const matches=jobs.jobs.filter(j=>j.name===expectedJob);
  if(matches.length!==1)HOLD("TARGET_PROTECTED_JOB");
  const j=matches[0];
  
+ if(primary){
+  const siblings=jobs.jobs.filter(x=>x!==j);
+  if(full){
+   const research=siblings[0];
+   if(siblings.length!==1||research.name!=="phase7-expiry"||
+      research.conclusion!=="success"||research.steps?.filter(s=>s.name==="Bounded derived research and temporary link due-only expiry"&&s.conclusion==="success"&&s.status==="completed").length!==1)
+    HOLD("TARGET_FULL_RETENTION_RESEARCH_STEP");
+  }else if(siblings.length>0&&(siblings.length!==1||siblings[0].name!=="phase7-expiry"||
+    siblings[0].conclusion!=="skipped"||!(siblings[0].steps==null||Array.isArray(siblings[0].steps)&&siblings[0].steps.length===0)))
+   HOLD("TARGET_PRIMARY_UNEXPECTED_SIBLING");
+ }
  if(!primary){
   const expectedSkipped=direct?["offline-direct-recovery",verify?"direct-protected-recovery-tick":"direct-readonly-verify"]:["offline-bounded-session-reconciliation"];
   if(!expectedSkipped.every(name=>jobs.jobs.filter(x=>x.name===name&&x.conclusion==="skipped"&&(x.steps==null||Array.isArray(x.steps)&&x.steps.length===0)).length===1))HOLD("TARGET_UNEXPECTED_JOB");
@@ -186,7 +199,7 @@ export async function observeTargetStep(c,targetRunId,targetGh){
   if(markers[1][0].conclusion==="success")return {status:"RELAY_TARGET_DIRECT_PREFLIGHT_HOLD_NO_POST",targetRunId,targetJobId:j.id,targetPin:c.targetPin};
   if(markers[2][0].conclusion==="success")return {status:"RELAY_TARGET_DIRECT_KNOWN_ACTIVE_CUSTODY_NOT_TERMINAL_PROOF",targetRunId,targetJobId:j.id,targetPin:c.targetPin};
  }
- return {status:"RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF",targetRunId,targetJobId:j.id,targetPin:c.targetPin};
+ return {status:"RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF",targetRunId,targetJobId:j.id,targetPin:c.targetPin,...(primary?{retentionScope:full?"FULL_BACKSTOP_BOTH_STEPS_METADATA_ONLY":"PRIMARY_ONLY_STEP_METADATA_ONLY",...(full?{researchJobId:jobs.jobs.find(x=>x.name==="phase7-expiry").id}:{})}:{})};
 }
 export function samples(rows,mode,limit=3){
  const good=rows.filter(x=>x.status==="CRON_HTTP_ACK_ONLY");
