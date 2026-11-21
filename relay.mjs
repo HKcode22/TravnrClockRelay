@@ -117,11 +117,19 @@ export function verifyNativeFullRetentionPrivateReceipt(log,run,job){
  });
  if(hits.length!==1)HOLD("FULL_RETENTION_NATIVE_PRIVATE_APPLY_RECEIPT");
  const r=hits[0],a=r.after,b=r.before,counts=["duePackets","dueIndexes","expiredHeads","foreignDuePackets","foreignDueIndexes"];
+ // The production wrapper authenticates the SQL schema, then projects away
+ // its schema/provider/write flags. Use the actual sanitized job-log shape
+ // (observed in run 44929165704), not the pre-projection SQL response.
+ const statusKeys=["observedAtUtc",...counts,"claims","deletionStopUnresolved"];
  const observed=Date.parse(a?.observedAtUtc),created=Date.parse(run.created_at),done=Date.parse(job.completed_at);
  if(r.reviewedMainSha!==run.head_sha||r.providerCalls!==0||r.phase6PaidGo!==false||
-    r.deadlineDueObservedAtInitialRead!==false||typeof r.databaseWritesPossible!=="boolean"||
-    !a||!b||[a,b].some(x=>x.schema!=="v39.phase6.private-epoch-expiry-status.v1"||
-     x.deletionStopUnresolved!==false||x.providerCalls!==0||x.databaseWrites!==0||x.phase6PaidGo!==false||counts.some(k=>x[k]!==0))||
+    r.backupOrPitrVerified!==false||r.completeRetentionDeploymentVerified!==false||
+    r.deadlineDueObservedAtInitialRead!==false||r.databaseWritesPossible!==false||
+    !Array.isArray(r.receipts)||r.receipts.length!==0||
+    !a||!b||[a,b].some(x=>Object.keys(x).length!==statusKeys.length||
+     !statusKeys.every(k=>Object.hasOwn(x,k))||!Number.isSafeInteger(x.claims)||x.claims<0||x.claims>31||
+     x.deletionStopUnresolved!==false||counts.some(k=>x[k]!==0))||
+    !statusKeys.every(k=>a[k]===b[k])||
     ![observed,created,done].every(Number.isFinite)||observed<created||observed>done+1000)
   HOLD("FULL_RETENTION_NATIVE_PRIVATE_APPLY_SCOPE");
  return {privateApplyReceiptVerified:true};
