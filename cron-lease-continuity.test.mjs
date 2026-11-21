@@ -66,3 +66,20 @@ test("only exact skipped mutation-capable step excludes prior run risk",()=>{
  assert.ok(end-Date.parse(OLD)<=14*86400000);
  assert.ok(end-Date.parse(RENEW_FROM)<=32*86400000);
  });
+
+
+test("released Monday full-retention lane renews only existing clock pair through exact outcome tail",async()=>{
+ const released={...env,TRAVNR_RELAY_MODE:"MULTI_LANE",TRAVNR_RELAY_PRIMARY_ENABLED:"1",TRAVNR_RELAY_ROLLING_ENABLED:"1",TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED:"1",TRAVNR_RELAY_FULL_RETENTION_APPROVED:"1",TRAVNR_APPROVED_TARGET_MAIN_SHA:"781140cde71af3b72376c2db9f0fdb84204a2b7c",TRAVNR_ROLLING_POLICY_UNTIL_UTC:"2026-12-29T04:00:00.000Z"};
+ const f=fixture(),before=[...f.store.values()].map(j=>structuredClone(j));
+ const a=await renewPair({...arg,env:released},f);
+ assert.equal(a.mode,"RELEASED");
+ assert.equal(a.status,"EXACT_PAIR_FIXED_LEASE_EXTENDED_VERIFIED");
+ assert.equal(a.cronMutations,2);assert.equal(a.targetDispatches,0);assert.equal(a.paidAuthorityGranted,false);
+ for(const old of before){
+  const next=f.store.get(old.jobId);
+  assert.deepEqual(next,{...old,schedule:{...old.schedule,expiresAt:20261230080000}});
+ }
+ const outside=fixture();
+ await assert.rejects(renewPair({...arg,env:{...released,TRAVNR_ROLLING_POLICY_UNTIL_UTC:"2026-12-30T08:00:01.000Z"}},outside),/MODE_OR_POLICY/);
+ assert.equal(outside.calls.length,0);
+});
