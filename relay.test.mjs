@@ -336,14 +336,16 @@ test("full retention never bootstraps from the selected primary-only read-only r
  assert.match(q.status,/NO_CURRENT_MAIN_FULL_RETENTION_APPLY_BASELINE/);
  assert.equal(x.posts(),0);
 });
-const privateExpiryStatus={schema:"v39.phase6.private-epoch-expiry-status.v1",observedAtUtc:new Date(NOW-41*60000).toISOString(),duePackets:0,dueIndexes:0,expiredHeads:0,foreignDuePackets:0,foreignDueIndexes:0,claims:0,deletionStopUnresolved:false,providerCalls:0,databaseWrites:0,phase6PaidGo:false};
-const privateExpiryApply={before:privateExpiryStatus,after:privateExpiryStatus,deadlineDueObservedAtInitialRead:false,providerCalls:0,phase6PaidGo:false,databaseWritesPossible:false,status:"PRIVATE_EXPIRY_DUE_AT_READBACK_CLEARED",reviewedMainSha:SHA};
+// Match actual projected production receipt (44929165704, job 136921785419),
+// including PostgreSQL offset timestamps and no nested SQL-only flags.
+const privateExpiryStatus={observedAtUtc:new Date(NOW-41*60000).toISOString().replace("Z","+00:00"),duePackets:0,dueIndexes:0,expiredHeads:0,foreignDuePackets:0,foreignDueIndexes:0,claims:0,deletionStopUnresolved:false};
+const privateExpiryApply={before:privateExpiryStatus,after:privateExpiryStatus,deadlineDueObservedAtInitialRead:false,providerCalls:0,backupOrPitrVerified:false,completeRetentionDeploymentVerified:false,phase6PaidGo:false,receipts:[],databaseWritesPossible:false,status:"PRIVATE_EXPIRY_DUE_AT_READBACK_CLEARED",reviewedMainSha:SHA};
 const nativeExpiryRun={...row(111,PRIMARY),created_at:new Date(NOW-50*60000).toISOString(),event:"schedule"};
 const nativeExpiryJob={completed_at:new Date(NOW-40*60000).toISOString()};
 test("native full retention requires a single exact private APPLY receipt, not VERIFY or a shifted clock",()=>{
  const log=x=>"timestamp "+JSON.stringify(x);
  assert.deepEqual(verifyNativeFullRetentionPrivateReceipt(log(privateExpiryApply),nativeExpiryRun,nativeExpiryJob),{privateApplyReceiptVerified:true});
- for(const bad of [{...privateExpiryApply,status:"PRIVATE_EXPIRY_VERIFY_ONLY_NO_WRITES"},{...privateExpiryApply,reviewedMainSha:LOCAL},{...privateExpiryApply,deadlineDueObservedAtInitialRead:true},{...privateExpiryApply,after:{...privateExpiryStatus,foreignDuePackets:1}},{...privateExpiryApply,after:{...privateExpiryStatus,observedAtUtc:new Date(NOW).toISOString()}}])
+ for(const bad of [{...privateExpiryApply,status:"PRIVATE_EXPIRY_VERIFY_ONLY_NO_WRITES"},{...privateExpiryApply,reviewedMainSha:LOCAL},{...privateExpiryApply,deadlineDueObservedAtInitialRead:true},{...privateExpiryApply,databaseWritesPossible:true},{...privateExpiryApply,receipts:[{}]},{...privateExpiryApply,after:{...privateExpiryStatus,claims:32}},{...privateExpiryApply,after:{...privateExpiryStatus,claims:1}},{...privateExpiryApply,after:{...privateExpiryStatus,foreignDuePackets:1}},{...privateExpiryApply,after:{...privateExpiryStatus,observedAtUtc:new Date(NOW).toISOString()}}])
   assert.throws(()=>verifyNativeFullRetentionPrivateReceipt(log(bad),nativeExpiryRun,nativeExpiryJob),/FULL_RETENTION_NATIVE_PRIVATE_APPLY/);
  assert.throws(()=>verifyNativeFullRetentionPrivateReceipt(log(privateExpiryApply)+"\n"+log(privateExpiryApply),nativeExpiryRun,nativeExpiryJob),/FULL_RETENTION_NATIVE_PRIVATE_APPLY/);
 });
