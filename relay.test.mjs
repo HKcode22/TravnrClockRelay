@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {runPulse,rootInputs,cronJobSpec,readPrimaryVerifyLog,verifyPrimaryBootstrapReceipt,provesNoTargetStep,directTargetDisposition,RELAY,TARGET,PILOT,PRIMARY,ROLLING,DIRECT,DIRECT_TITLE,DIRECT_CONFIRM,DIRECT_VERIFY_TITLE,DIRECT_VERIFY_CONFIRM,FULL_RETENTION_CONFIRM,FULL_RETENTION_TITLE} from "./relay.mjs";
+import {runPulse,rootInputs,cronJobSpec,readPrimaryVerifyLog,verifyPrimaryBootstrapReceipt,verifyNativeFullRetentionPrivateReceipt,provesNoTargetStep,directTargetDisposition,RELAY,TARGET,PILOT,PRIMARY,ROLLING,DIRECT,DIRECT_TITLE,DIRECT_CONFIRM,DIRECT_VERIFY_TITLE,DIRECT_VERIFY_CONFIRM,FULL_RETENTION_CONFIRM,FULL_RETENTION_TITLE} from "./relay.mjs";
 const NOW=Date.parse("2026-11-18T06:00:00.000Z"),SHA="a".repeat(40),LOCAL="b".repeat(40);
 const tok="github_pat_"+ "x".repeat(30),root="https://api.github.com/repos/";
 const wrap=(data,status=200)=>({status,ok:status===200,json:async()=>data});
@@ -69,7 +69,7 @@ function f(mode,fault=""){
     {...j,id:513,name:env.TRAVNR_RELAY_ROLLING_ROUTE==="DIRECT_VERIFY"?"direct-protected-recovery-tick":"direct-readonly-verify",conclusion:"skipped",steps:[]}]});
   }
   if(url.includes("/actions/runs/112/jobs"))return wrap({total_count:2,jobs:[{id:501,name:"one-protected-bounded-session",run_id:112,head_sha:SHA,run_attempt:1,status:"completed",conclusion:fault==="skip"?"skipped":"success",steps:fault==="skip"?[]:[{name:"Execute one protected rolling session"}]},{id:502,name:"offline-bounded-session-reconciliation",run_id:112,head_sha:SHA,run_attempt:1,status:"completed",conclusion:"skipped",steps:[]}]});
-  if(url.includes("/actions/runs/111/jobs"))return wrap({total_count:1,jobs:[{name:"primary-fids-expiry",run_id:111,head_sha:SHA,run_attempt:1,status:"completed",conclusion:"success",completed_at:new Date(NOW-(fault==="recent"?5:40)*60000).toISOString(),steps:[{name:"Verify exact main and execute only bounded primary FIDS expiry",status:"completed",conclusion:"success"}]}]});
+  if(url.includes("/actions/runs/111/jobs"))return wrap({total_count:1,jobs:[{id:1111,name:"primary-fids-expiry",run_id:111,head_sha:SHA,run_attempt:1,status:"completed",conclusion:"success",completed_at:new Date(NOW-(fault==="recent"?5:40)*60000).toISOString(),steps:[{name:"Verify exact main and execute only bounded primary FIDS expiry",status:"completed",conclusion:"success"}]}]});
   if(url.includes("&status="))return wrap({total_count:fault==="active"?1:0,workflow_runs:fault==="active"?[row(301,wf,SHA,"queued")]:[]});
   if(url.includes("per_page=20"))return wrap({total_count:1,workflow_runs:[{...row(111,wf),event:["verifyOnly","coldStart","evilHost","notZero","twoJobVerify","executedSibling","unknownSibling"].includes(fault)?"workflow_dispatch":"schedule"}]});
   if(url.includes("&created="))return wrap({total_count:["window","skip","partial","failedRoot"].includes(fault)?1:0,workflow_runs:["window","skip","partial","failedRoot"].includes(fault)?[{...row(112,wf),conclusion:fault==="failedRoot"?"failure":"success"}]:[]});
@@ -304,10 +304,10 @@ test("full retention cannot treat prior primary-only success as full cleanup",as
    const raw=await z.json();return {ok:true,status:200,json:async()=>({...raw,workflow_runs:raw.workflow_runs.map(r=>({...r,event:"workflow_dispatch",display_title:"P5 PRIMARY BACKSTOP CHILD"}))})};
   }return z;
  };
- const q=await runPulse(x.env,x.opts);assert.match(q.status,/NO_CURRENT_MAIN_APPLY_BASELINE/);assert.equal(x.posts(),0);
+ const q=await runPulse(x.env,x.opts);assert.match(q.status,/NO_CURRENT_MAIN_FULL_RETENTION_APPLY_BASELINE/);assert.equal(x.posts(),0);
 });
 
-test("full retention accepts a stale successful dual-job baseline and makes exactly one scoped wake",async()=>{
+test("full retention accepts a stale successful explicit full-scope dual-job baseline and makes exactly one scoped wake",async()=>{
  const x=multi("PRIMARY_BACKSTOP");x.env.TRAVNR_RELAY_FULL_RETENTION_APPROVED="1";
  const get=x.opts.fetcher;
  x.opts.fetcher=async(url,init)=>{
@@ -315,6 +315,7 @@ test("full retention accepts a stale successful dual-job baseline and makes exac
    const z=await get(url,init),v=await z.json();
    return wrap({total_count:2,jobs:[...v.jobs,{...v.jobs[0],id:v.jobs[0].id+100,name:"phase7-expiry",steps:[{name:"Bounded derived research and temporary link due-only expiry",status:"completed",conclusion:"success"}]}]});
   }
+  if(url.includes("/actions/workflows/"+PRIMARY+"/runs?branch=main&per_page=20"))return wrap({total_count:1,workflow_runs:[{...row(111,PRIMARY),created_at:new Date(NOW-50*60000).toISOString(),display_title:FULL_RETENTION_TITLE}]});
   if(url===root+TARGET+"/actions/runs/201")return wrap({...row(201,PRIMARY,SHA,"queued"),display_title:FULL_RETENTION_TITLE});
   return get(url,init);
  };
@@ -324,5 +325,45 @@ test("full retention accepts a stale successful dual-job baseline and makes exac
 test("full retention refuses a scheduled baseline without successful research sibling",async()=>{
  const x=multi("PRIMARY_BACKSTOP");x.env.TRAVNR_RELAY_FULL_RETENTION_APPROVED="1";
  const q=await runPulse(x.env,x.opts);
- assert.match(q.reason,/FULL_RETENTION_RESEARCH_STEP/);assert.equal(x.posts(),0);
+ assert.match(q.reason,/FULL_RETENTION_JOB_SET|FULL_RETENTION_RESEARCH_STEP/);assert.equal(x.posts(),0);
+});
+
+test("full retention never bootstraps from the selected primary-only read-only receipt",async()=>{
+ const x=multi("PRIMARY_BACKSTOP","coldStart");
+ x.env.TRAVNR_RELAY_FULL_RETENTION_APPROVED="1";
+ x.env.TRAVNR_RELAY_PRIMARY_VERIFY_RUN_ID="202";
+ const q=await runPulse(x.env,x.opts);
+ assert.match(q.status,/NO_CURRENT_MAIN_FULL_RETENTION_APPLY_BASELINE/);
+ assert.equal(x.posts(),0);
+});
+const privateExpiryStatus={schema:"v39.phase6.private-epoch-expiry-status.v1",observedAtUtc:new Date(NOW-41*60000).toISOString(),duePackets:0,dueIndexes:0,expiredHeads:0,foreignDuePackets:0,foreignDueIndexes:0,claims:0,deletionStopUnresolved:false,providerCalls:0,databaseWrites:0,phase6PaidGo:false};
+const privateExpiryApply={before:privateExpiryStatus,after:privateExpiryStatus,deadlineDueObservedAtInitialRead:false,providerCalls:0,phase6PaidGo:false,databaseWritesPossible:false,status:"PRIVATE_EXPIRY_DUE_AT_READBACK_CLEARED",reviewedMainSha:SHA};
+const nativeExpiryRun={...row(111,PRIMARY),created_at:new Date(NOW-50*60000).toISOString(),event:"schedule"};
+const nativeExpiryJob={completed_at:new Date(NOW-40*60000).toISOString()};
+test("native full retention requires a single exact private APPLY receipt, not VERIFY or a shifted clock",()=>{
+ const log=x=>"timestamp "+JSON.stringify(x);
+ assert.deepEqual(verifyNativeFullRetentionPrivateReceipt(log(privateExpiryApply),nativeExpiryRun,nativeExpiryJob),{privateApplyReceiptVerified:true});
+ for(const bad of [{...privateExpiryApply,status:"PRIVATE_EXPIRY_VERIFY_ONLY_NO_WRITES"},{...privateExpiryApply,reviewedMainSha:LOCAL},{...privateExpiryApply,deadlineDueObservedAtInitialRead:true},{...privateExpiryApply,after:{...privateExpiryStatus,foreignDuePackets:1}},{...privateExpiryApply,after:{...privateExpiryStatus,observedAtUtc:new Date(NOW).toISOString()}}])
+  assert.throws(()=>verifyNativeFullRetentionPrivateReceipt(log(bad),nativeExpiryRun,nativeExpiryJob),/FULL_RETENTION_NATIVE_PRIVATE_APPLY/);
+ assert.throws(()=>verifyNativeFullRetentionPrivateReceipt(log(privateExpiryApply)+"\n"+log(privateExpiryApply),nativeExpiryRun,nativeExpiryJob),/FULL_RETENTION_NATIVE_PRIVATE_APPLY/);
+});
+test("native dual-job success is not enough if private APPLY was not executed",async()=>{
+ for(const apply of [true,false]){
+  const x=multi("PRIMARY_BACKSTOP");x.env.TRAVNR_RELAY_FULL_RETENTION_APPROVED="1";
+  const get=x.opts.fetcher;
+  x.opts.fetcher=async(url,init)=>{
+   if(url.includes("/actions/workflows/"+PRIMARY+"/runs?branch=main&per_page=20"))return wrap({total_count:1,workflow_runs:[nativeExpiryRun]});
+   if(url.includes("/actions/runs/111/jobs")){
+    const z=await get(url,init),v=await z.json();
+    return wrap({total_count:2,jobs:[...v.jobs,{...v.jobs[0],id:1112,name:"phase7-expiry",steps:[{name:"Bounded derived research and temporary link due-only expiry",status:"completed",conclusion:"success"}]}]});
+   }
+   if(url===root+TARGET+"/actions/jobs/1111/logs")return new Response("",{status:302,headers:{Location:"https://logs.blob.core.windows.net/private-fixture"}});
+   if(url==="https://logs.blob.core.windows.net/private-fixture"){assert.equal(init.headers,undefined);return new Response("timestamp "+JSON.stringify(apply?privateExpiryApply:{...privateExpiryApply,status:"PRIVATE_EXPIRY_VERIFY_ONLY_NO_WRITES"}));}
+   if(url===root+TARGET+"/actions/runs/201")return wrap({...row(201,PRIMARY,SHA,"queued"),display_title:FULL_RETENTION_TITLE});
+   return get(url,init);
+  };
+  const q=await runPulse(x.env,x.opts);
+  if(apply){assert.equal(q.targetRunId,201);assert.equal(x.posts(),1);}
+  else{assert.match(q.reason,/FULL_RETENTION_NATIVE_PRIVATE_APPLY_RECEIPT/);assert.equal(x.posts(),0);}
+ }
 });
