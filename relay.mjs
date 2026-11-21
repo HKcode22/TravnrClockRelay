@@ -107,6 +107,25 @@ export function verifyPrimaryBootstrapReceipt(run,jobs,log,expectedSha,runId,clo
   HOLD("PRIMARY_BOOTSTRAP_VERIFY_RECEIPT_REVIEW");
  return {verifiedRunId:runId,verifiedJobId:j.id,observedAtUtc:iso(seen)};
 }
+/** A native schedule may be green while its private extension is only in
+ * commission/VERIFY mode. Only a unique actual APPLY receipt qualifies it
+ * as full-retention cadence. No log text or source data leaves this check. */
+export function verifyNativeFullRetentionPrivateReceipt(log,run,job){
+ const hits=String(log).split(/\r?\n/).flatMap(line=>{
+  const i=line.indexOf("{");if(i<0)return [];
+  try{const x=JSON.parse(line.slice(i).trim());return x?.status==="PRIVATE_EXPIRY_DUE_AT_READBACK_CLEARED"?[x]:[];}catch{return [];}
+ });
+ if(hits.length!==1)HOLD("FULL_RETENTION_NATIVE_PRIVATE_APPLY_RECEIPT");
+ const r=hits[0],a=r.after,b=r.before,counts=["duePackets","dueIndexes","expiredHeads","foreignDuePackets","foreignDueIndexes"];
+ const observed=Date.parse(a?.observedAtUtc),created=Date.parse(run.created_at),done=Date.parse(job.completed_at);
+ if(r.reviewedMainSha!==run.head_sha||r.providerCalls!==0||r.phase6PaidGo!==false||
+    r.deadlineDueObservedAtInitialRead!==false||typeof r.databaseWritesPossible!=="boolean"||
+    !a||!b||[a,b].some(x=>x.schema!=="v39.phase6.private-epoch-expiry-status.v1"||
+     x.deletionStopUnresolved!==false||x.providerCalls!==0||x.databaseWrites!==0||x.phase6PaidGo!==false||counts.some(k=>x[k]!==0))||
+    ![observed,created,done].every(Number.isFinite)||observed<created||observed>done+1000)
+  HOLD("FULL_RETENTION_NATIVE_PRIVATE_APPLY_SCOPE");
+ return {privateApplyReceiptVerified:true};
+}
 /** Exact same-code failed run where the only forwarding step did not execute.
  * Do not infer absence from missing step lists on an assigned runner. */
 export function provesNoTargetStep(run,jobs){
@@ -299,6 +318,10 @@ export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep
      (r.event==="schedule"||r.event==="workflow_dispatch"&&r.display_title===(fullRetention?FULL_RETENTION_TITLE:"P5 PRIMARY BACKSTOP CHILD"))&&(!fullRetention||Date.parse(r.created_at)>=since))
      .sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)||b.id-a.id);
    if(!eligible.length){
+    // The old primary-only VERIFY bootstrap never proves full retention. The
+    // owner must first execute the exact scoped manual dual-job APPLY or an
+    // actual native dual-job APPLY with its private extension receipt.
+    if(fullRetention)return result("DEFER_NO_CURRENT_MAIN_FULL_RETENTION_APPLY_BASELINE_REVIEW",clock);
     // A fresh, separately selected exact VERIFY receipt is only a bounded
     // first-wake baseline. Never bypass a prior failed/unknown APPLY.
     const v=env.TRAVNR_RELAY_PRIMARY_VERIFY_RUN_ID;
@@ -323,10 +346,16 @@ export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep
    if(good.length!==1||!Number.isFinite(Date.parse(good[0].completed_at))||Date.parse(good[0].completed_at)>now())HOLD("PRIMARY_STEP");
    let lastDone=Date.parse(good[0].completed_at);
    if(fullRetention){
+    if(js.length!==2||!js.every(j=>id(j.id))||new Set(js.map(j=>j.id)).size!==2)HOLD("FULL_RETENTION_JOB_SET");
     const research=js.filter(j=>j.name==="phase7-expiry"&&j.run_id===last.id&&j.head_sha===last.head_sha&&j.run_attempt===1&&j.status==="completed"&&j.conclusion==="success"&&
       j.steps?.filter(s=>s.name==="Bounded derived research and temporary link due-only expiry"&&s.status==="completed"&&s.conclusion==="success").length===1);
     if(research.length!==1||!Number.isFinite(Date.parse(research[0].completed_at))||Date.parse(research[0].completed_at)>now())HOLD("FULL_RETENTION_RESEARCH_STEP");
     lastDone=Math.min(lastDone,Date.parse(research[0].completed_at));
+    if(last.event==="schedule"){
+     reads+=2;if(reads>40||now()-start>120000)HOLD("READ_BOUND");
+     const log=await readPrimaryVerifyLog(fetcher,env.TRAVNR_TARGET_ACTIONS_TOKEN,good[0].id);
+     verifyNativeFullRetentionPrivateReceipt(log,last,good[0]);
+    }
    }
    if(now()-lastDone<(fullRetention?10:20)*MIN)return result("DEFER_RECENT_PRIMARY_STEP_NOT_DELETION_PROOF",clock);
    }
