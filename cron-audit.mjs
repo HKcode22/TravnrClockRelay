@@ -209,7 +209,7 @@ export function leaseHealth(c,mode,now){
  * Only the exact pair may advance to the predetermined later expiry.
  * Partial renewal must still surface as a pair-level incident. */
 export function continuityConfig(c,job,mode,now){
- const old="2026-12-19T08:00:00.000Z",end="2026-12-27T08:00:00.000Z";
+ const old="2026-12-19T08:00:00.000Z",end="2026-12-30T08:00:00.000Z";
  const exactPair=[["PRIMARY_BACKSTOP",8890475],["ROLLING_ROOT",8890476]].some(([l,n])=>laneOf(c)===l&&c.jobId===n);
  if(c.leaseContinuity===true&&exactPair&&["RECENT","SHADOW_RECENT"].includes(mode)&&
     c.until===old&&now>=Date.parse("2026-12-12T08:00:00.000Z")&&job?.schedule?.expiresAt===utcNumber(time(end)))
