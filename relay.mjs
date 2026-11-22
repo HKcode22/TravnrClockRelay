@@ -117,21 +117,46 @@ export function verifyNativeFullRetentionPrivateReceipt(log,run,job){
  });
  if(hits.length!==1)HOLD("FULL_RETENTION_NATIVE_PRIVATE_APPLY_RECEIPT");
  const r=hits[0],a=r.after,b=r.before,counts=["duePackets","dueIndexes","expiredHeads","foreignDuePackets","foreignDueIndexes"];
- // The production wrapper authenticates the SQL schema, then projects away
- // its schema/provider/write flags. Use the actual sanitized job-log shape
- // (observed in run 44929165704), not the pre-projection SQL response.
- const statusKeys=["observedAtUtc",...counts,"claims","deletionStopUnresolved"];
- const observed=Date.parse(a?.observedAtUtc),created=Date.parse(run.created_at),done=Date.parse(job.completed_at);
+ const n=x=>Number.isSafeInteger(x)&&x>=0;
+ const v2=!!b&&Object.hasOwn(b,"dueOperationalMetadataPackets");
+ const statusKeys=["observedAtUtc",...counts,"claims","deletionStopUnresolved",...(v2?["dueOperationalMetadataPackets"]:[])];
+ const observed=Date.parse(a?.observedAtUtc),started=Date.parse(b?.observedAtUtc),created=Date.parse(run.created_at),done=Date.parse(job.completed_at);
  if(r.reviewedMainSha!==run.head_sha||r.providerCalls!==0||r.phase6PaidGo!==false||
     r.backupOrPitrVerified!==false||r.completeRetentionDeploymentVerified!==false||
-    r.deadlineDueObservedAtInitialRead!==false||r.databaseWritesPossible!==false||
-    !Array.isArray(r.receipts)||r.receipts.length!==0||
+    r.deadlineDueObservedAtInitialRead!==false||typeof r.databaseWritesPossible!=="boolean"||
+    !Array.isArray(r.receipts)||r.receipts.length>4||
     !a||!b||[a,b].some(x=>Object.keys(x).length!==statusKeys.length||
-     !statusKeys.every(k=>Object.hasOwn(x,k))||!Number.isSafeInteger(x.claims)||x.claims<0||x.claims>31||
-     x.deletionStopUnresolved!==false||counts.some(k=>x[k]!==0))||
-    !statusKeys.every(k=>a[k]===b[k])||
-    ![observed,created,done].every(Number.isFinite)||observed<created||observed>done+1000)
+     !statusKeys.every(k=>Object.hasOwn(x,k))||!n(x.claims)||x.claims>31||
+     x.deletionStopUnresolved!==false||counts.some(k=>!n(x[k])))||
+    a.claims!==b.claims||counts.some(k=>a[k]!==0)||
+    ![observed,started,created,done].every(Number.isFinite)||started<created||observed<started||observed>done+1000)
   HOLD("FULL_RETENTION_NATIVE_PRIVATE_APPLY_SCOPE");
+ if(!v2){
+  // Preserve exact historical V0105 empty-scope baseline, never infer
+  // successful populated cleanup without the new locked-cutoff evidence.
+  if(r.databaseWritesPossible||r.receipts.length!==0||counts.some(k=>b[k]!==0)||!statusKeys.every(k=>a[k]===b[k]))
+   HOLD("FULL_RETENTION_NATIVE_PRIVATE_APPLY_LEGACY_SCOPE");
+ }else{
+  if(!n(b.dueOperationalMetadataPackets)||b.duePackets!==b.dueOperationalMetadataPackets||
+     r.dueOperationalMetadataPackets!==b.duePackets||a.dueOperationalMetadataPackets!==0||
+     counts.slice(1).some(k=>b[k]!==0)||r.deadlineDueObservedDuringSweep!==false)
+   HOLD("FULL_RETENTION_NATIVE_PRIVATE_APPLY_HARD_DEADLINE");
+  const unique=new Set();let packets=0,previous=started;
+  for(const x of r.receipts){
+   const at=Date.parse(x?.observedAtUtc);
+   if(!x||!/^P6-PRIVATE-SWEEP-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(x.runId??"")||unique.has(x.runId)||
+      !Number.isFinite(at)||at<previous||at>observed||!n(x.packets)||x.packets>128||
+      x.indexRevisions!==0||x.earlierIndexRevisionsRetired!==0||x.claimsPreserved!==b.claims||
+      !n(x.remainingDuePackets)||x.remainingExpiredHeads!==0||x.hardDueAtSweep!==0||
+      typeof x.commitAck!=="boolean"||x.independentAggregateReceiptVerified!==(x.packets>0)||
+      (x.packets===0&&!x.commitAck))
+    HOLD("FULL_RETENTION_NATIVE_PRIVATE_APPLY_BATCH");
+   unique.add(x.runId);packets+=x.packets;previous=at;
+  }
+  if(r.databaseWritesPossible!==(packets>0)||packets<b.duePackets||
+     (b.duePackets===0&&r.receipts.length!==0)||(!r.receipts.length&&started!==observed))
+   HOLD("FULL_RETENTION_NATIVE_PRIVATE_APPLY_ACCOUNTING");
+ }
  return {privateApplyReceiptVerified:true};
 }
 /** Exact same-code failed run where the only forwarding step did not execute.
