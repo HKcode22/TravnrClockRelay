@@ -349,6 +349,18 @@ test("native full retention requires a single exact private APPLY receipt, not V
   assert.throws(()=>verifyNativeFullRetentionPrivateReceipt(log(bad),nativeExpiryRun,nativeExpiryJob),/FULL_RETENTION_NATIVE_PRIVATE_APPLY/);
  assert.throws(()=>verifyNativeFullRetentionPrivateReceipt(log(privateExpiryApply)+"\n"+log(privateExpiryApply),nativeExpiryRun,nativeExpiryJob),/FULL_RETENTION_NATIVE_PRIVATE_APPLY/);
 });
+test("populated private metadata sweep must prove every committed batch and zero hard due at locked cutoff",()=>{
+ const before={...privateExpiryStatus,duePackets:3,dueOperationalMetadataPackets:3,claims:1};
+ const after={...before,observedAtUtc:new Date(NOW-40.5*60000).toISOString(),duePackets:0,dueOperationalMetadataPackets:0};
+ const batch={runId:"P6-PRIVATE-SWEEP-12345678-1234-4123-8123-123456789abc",observedAtUtc:new Date(NOW-40.75*60000).toISOString(),packets:3,indexRevisions:0,earlierIndexRevisionsRetired:0,claimsPreserved:1,remainingDuePackets:0,remainingExpiredHeads:0,hardDueAtSweep:0,commitAck:true,independentAggregateReceiptVerified:true};
+ const receipt={...privateExpiryApply,before,after,dueOperationalMetadataPackets:3,deadlineDueObservedDuringSweep:false,databaseWritesPossible:true,receipts:[batch]};
+ const check=x=>verifyNativeFullRetentionPrivateReceipt("timestamp "+JSON.stringify(x),nativeExpiryRun,nativeExpiryJob);
+ assert.deepEqual(check(receipt),{privateApplyReceiptVerified:true});
+ assert.deepEqual(check({...receipt,receipts:[{...batch,commitAck:false}]}),{privateApplyReceiptVerified:true});
+ for(const bad of [{...receipt,deadlineDueObservedDuringSweep:true},{...receipt,before:{...before,duePackets:4}},{...receipt,receipts:[{...batch,hardDueAtSweep:1}]},{...receipt,receipts:[{...batch,independentAggregateReceiptVerified:false}]},{...receipt,receipts:[{...batch,indexRevisions:1}]},{...receipt,receipts:[{...batch,packets:2}]},{...receipt,receipts:[batch,batch]},{...receipt,after:{...after,dueOperationalMetadataPackets:1}},{...receipt,receipts:[]},{...receipt,databaseWritesPossible:false}])assert.throws(()=>check(bad),/FULL_RETENTION_NATIVE_PRIVATE_APPLY/);
+ const empty={...privateExpiryStatus,dueOperationalMetadataPackets:0};
+ assert.deepEqual(check({...privateExpiryApply,before:empty,after:empty,dueOperationalMetadataPackets:0,deadlineDueObservedDuringSweep:false}),{privateApplyReceiptVerified:true});
+});
 test("native dual-job success is not enough if private APPLY was not executed",async()=>{
  for(const apply of [true,false]){
   const x=multi("PRIMARY_BACKSTOP");x.env.TRAVNR_RELAY_FULL_RETENTION_APPROVED="1";
