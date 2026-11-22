@@ -57,6 +57,7 @@ test("recovery acknowledgement cannot certify target collection and skipped is u
  assert.throws(()=>verifyReceipt(q,a.r,101,{...run,display_title:"other"},jobs,JSON.stringify(receipt)),/RUN_IDENTITY/);
  assert.equal(verifyReceipt(q,a.r,101,run,{total_count:1,jobs:[{...j,conclusion:"skipped",steps:[]}]},null).status,"RELAY_FORWARD_SKIPPED");
  assert.equal(verifyReceipt(q,a.r,101,run,jobs,JSON.stringify({...receipt,status:"QUARANTINED_PRIOR_RELAY_RUN_REVIEW"})).status,"RELAY_REVIEW_REQUIRED");
+ assert.equal(verifyReceipt(q,a.r,101,run,jobs,JSON.stringify({...receipt,status:"DEFER_NO_CURRENT_MAIN_FULL_RETENTION_APPLY_BASELINE_REVIEW"})).status,"RELAY_REVIEW_REQUIRED");
 });
 test("pair mode samples at most one detail per lane and never reports full pilot proof",async()=>{
  const f=fixture(),a=await audit({c,mode:"RECENT",now,sampleLimit:1,...f});assert.equal(a.proven,1);assert.equal(a.ackOnly,8);assert.equal(f.cronCalls.length,3);assert.equal(a.fullyProven,false);
@@ -64,10 +65,22 @@ test("pair mode samples at most one detail per lane and never reports full pilot
 
 test("target ACK is not execution proof; distinguish pending, skipped, failed and exact completed step",async()=>{
  const pin="b".repeat(40),c={lane:"PRIMARY_BACKSTOP",targetPin:pin},n=777;
- const row={id:n,head_sha:pin,head_branch:"main",event:"workflow_dispatch",path:".github/workflows/phase5-primary-fids-expiry-no-provider.yml",run_attempt:1,status:"completed",conclusion:"success"};
+ const row={id:n,head_sha:pin,head_branch:"main",event:"workflow_dispatch",display_title:"P5 PRIMARY BACKSTOP CHILD",path:".github/workflows/phase5-primary-fids-expiry-no-provider.yml",run_attempt:1,status:"completed",conclusion:"success"};
  const j={id:888,name:"primary-fids-expiry",run_id:n,head_sha:pin,run_attempt:1,status:"completed",conclusion:"success",steps:[{name:"Verify exact main and execute only bounded primary FIDS expiry",conclusion:"success",status:"completed"}]};
- const get=(r=row,job=j)=>async path=>path.includes("/jobs")?{total_count:1,jobs:[job]}:r;
+ const get=(r=row,job=j,rest=[])=>async path=>path.includes("/jobs")?{total_count:1+rest.length,jobs:[job,...rest]}:r;
  assert.equal((await observeTargetStep(c,n,get())).status,"RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF");
+ const skip={...j,id:889,name:"phase7-expiry",conclusion:"skipped",steps:[]};
+ const research={...j,id:889,name:"phase7-expiry",steps:[{name:"Bounded derived research and temporary link due-only expiry",conclusion:"success",status:"completed"}]};
+ const full={...row,display_title:"P5 FULL RETENTION BACKSTOP CHILD"};
+ const primary=await observeTargetStep(c,n,get(row,j,[skip]));
+ assert.equal(primary.retentionScope,"PRIMARY_ONLY_STEP_METADATA_ONLY");
+ const result=await observeTargetStep(c,n,get(full,j,[research]));
+ assert.equal(result.retentionScope,"FULL_BACKSTOP_BOTH_STEPS_METADATA_ONLY");assert.equal(result.researchJobId,889);
+ await assert.rejects(observeTargetStep(c,n,get(full,j,[skip])),/TARGET_FULL_RETENTION_RESEARCH_STEP/);
+ await assert.rejects(observeTargetStep(c,n,get(full,j,[])),/TARGET_JOBS/);
+ await assert.rejects(observeTargetStep(c,n,get(row,j,[research])),/TARGET_PRIMARY_UNEXPECTED_SIBLING/);
+ await assert.rejects(observeTargetStep(c,n,get(full,j,[{...research,steps:[]}])) ,/TARGET_FULL_RETENTION_RESEARCH_STEP/);
+ await assert.rejects(observeTargetStep(c,n,get({...row,display_title:"Phase5 primary FIDS expiry (STOP default, no provider)"})),/TARGET_PRIMARY_TITLE/);
  assert.equal((await observeTargetStep(c,n,get({...row,status:"queued",conclusion:null}))).status,"RELAY_TARGET_PENDING_EXECUTION");
  assert.equal((await observeTargetStep(c,n,get({...row,conclusion:"failure"}))).status,"RELAY_TARGET_TERMINAL_FAILURE");
  assert.equal((await observeTargetStep(c,n,get(row,{...j,conclusion:"skipped",steps:[]}))).status,"RELAY_TARGET_PROTECTED_JOB_SKIPPED");
@@ -147,10 +160,10 @@ test("automatic shadow observation accepts only activation or current code pin, 
 
 test("routine lease audit advances only fixed existing pair and exact approved expiry at renewal window",()=>{
  const c={lane:"PRIMARY_BACKSTOP",jobId:8890475,until:"2026-12-19T08:00:00.000Z",leaseContinuity:true};
- const j={schedule:{expiresAt:20261227080000}},t=Date.parse("2026-12-12T08:00:00Z");
- assert.equal(continuityConfig(c,j,"RECENT",t).until,"2026-12-27T08:00:00.000Z");
- assert.equal(continuityConfig(c,j,"SHADOW_RECENT",t).until,"2026-12-27T08:00:00.000Z");
- for(const [cfg,job,mode,now] of [[{...c,leaseContinuity:false},j,"RECENT",t],[{...c,jobId:1},j,"RECENT",t],[c,j,"SHADOW",t],[c,j,"RECENT",t-1],[c,{schedule:{expiresAt:20261228080000}},"RECENT",t]])assert.equal(continuityConfig(cfg,job,mode,now).until,c.until);
+ const j={schedule:{expiresAt:20261230080000}},t=Date.parse("2026-12-12T08:00:00Z");
+ assert.equal(continuityConfig(c,j,"RECENT",t).until,"2026-12-30T08:00:00.000Z");
+ assert.equal(continuityConfig(c,j,"SHADOW_RECENT",t).until,"2026-12-30T08:00:00.000Z");
+ for(const [cfg,job,mode,now] of [[c,{schedule:{expiresAt:20261227080000}},"RECENT",t],[{...c,leaseContinuity:false},j,"RECENT",t],[{...c,jobId:1},j,"RECENT",t],[c,j,"SHADOW",t],[c,j,"RECENT",t-1],[c,{schedule:{expiresAt:20261228080000}},"RECENT",t]])assert.equal(continuityConfig(cfg,job,mode,now).until,c.until);
 });
 
 test("direct target audit distinguishes a reconciled wave from green preflight HOLD",async()=>{

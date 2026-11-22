@@ -6,7 +6,7 @@ const now=Date.parse("2026-12-12T09:00:00.000Z"),pin="a".repeat(40),token="githu
 const env={GITHUB_SHA:pin,TRAVNR_LEASE_CONTINUITY_ARMED:"1",TRAVNR_RELAY_MODE:"CLOCK_ONLY",TRAVNR_CRON_RELAY_TOKEN:token};
 function fixture(fault=""){
  const store=new Map(ACTUAL_PAIR.map(x=>[x.jobId,{jobId:x.jobId,...managedSpec({lane:x.lane,until:fault==="extended"?EXTENDED:OLD,token,now}),enabled:true}]));
- if(fault==="partial")store.get(8890475).schedule.expiresAt=20261227080000;
+ if(fault==="partial")store.get(8890475).schedule.expiresAt=20261230080000;
  if(fault==="disabled")store.get(8890476).enabled=false;
  if(fault==="cadence")store.get(8890476).schedule.minutes=[8,28,48];
  if(fault==="auth")store.get(8890476).extendedData.headers.Authorization="Bearer github_pat_"+"y".repeat(40);
@@ -29,7 +29,7 @@ test("actual two IDs, schedule-only fixed extension, no forwarding or credential
  assert.deepEqual(a.rows.map(x=>x.jobId),[8890475,8890476]);assert.equal(a.targetDispatches,0);assert.equal(a.paidAuthorityGranted,false);
  assert.deepEqual(f.calls.map(x=>x.method),["GET","GET","GET","GET","PATCH","GET","GET","PATCH","GET"]);
  assert(!JSON.stringify([a,f.events]).includes(token));
- for(const j of f.store.values())assert.equal(j.schedule.expiresAt,20261227080000);
+ for(const j of f.store.values())assert.equal(j.schedule.expiresAt,20261230080000);
 });
 test("both renewed already: independently read back, no further writes even after prior attempt",async()=>{
  const f=fixture("extended"),a=await renewPair({...arg,priorRisk:[123]},f);
@@ -47,7 +47,9 @@ test("no writes outside fixed window or with uncommissioned/mixed mode",async()=
  for(const n of [Date.parse(RENEW_FROM)-1,Date.parse(RENEW_LAST)+1]){const f=fixture(),a=await renewPair({...arg,now:n},f);assert.equal(a.cronMutations,0);assert.equal(f.calls.length,0)}
  for(const patch of [{TRAVNR_LEASE_CONTINUITY_ARMED:"0"},{TRAVNR_RELAY_PRIMARY_ENABLED:"1"},{TRAVNR_RELAY_MODE:"MULTI_LANE"}]){const f=fixture();await assert.rejects(renewPair({...arg,env:{...env,...patch}},f));assert.equal(f.calls.length,0)}
  const released={...env,TRAVNR_RELAY_MODE:"MULTI_LANE",TRAVNR_RELAY_PRIMARY_ENABLED:"1",TRAVNR_RELAY_ROLLING_ENABLED:"1",TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED:"1",TRAVNR_APPROVED_TARGET_MAIN_SHA:pin,TRAVNR_ROLLING_POLICY_UNTIL_UTC:"2026-12-25T00:00:00.000Z"};
- assert.equal(renewalMode(released),"RELEASED");assert.throws(()=>renewalMode({...released,TRAVNR_ROLLING_POLICY_UNTIL_UTC:"2026-12-28T00:00:00.000Z"}),/MODE_OR_POLICY/);
+ assert.equal(renewalMode(released),"RELEASED");
+ assert.equal(renewalMode({...released,TRAVNR_ROLLING_POLICY_UNTIL_UTC:"2026-12-29T04:00:00.000Z"}),"RELEASED");
+ assert.throws(()=>renewalMode({...released,TRAVNR_ROLLING_POLICY_UNTIL_UTC:"2026-12-30T08:00:01.000Z"}),/MODE_OR_POLICY/);
 });
 test("only exact skipped mutation-capable step excludes prior run risk",()=>{
  const r={id:1,head_sha:pin,head_branch:"main",event:"schedule",path:".github/workflows/cron-lease-continuity.yml",status:"completed",run_attempt:1};
@@ -56,4 +58,28 @@ test("only exact skipped mutation-capable step excludes prior run risk",()=>{
  assert.equal(classifyPriorRun(r,j,pin),false);
  j.jobs[1].steps[0].conclusion="failure";assert.equal(classifyPriorRun(r,j,pin),true);
  assert.equal(classifyPriorRun({...r,head_sha:"b".repeat(40)},j,pin),true);
+});
+
+ test("fixed lease covers the Monday POST tail and one full 24h final FIDS window, within existing renewal bounds",()=>{
+ const tail=Date.parse("2026-12-29T04:00:00.000Z"),end=Date.parse(EXTENDED);
+ assert.equal(end-tail,28*3600000);
+ assert.ok(end-Date.parse(OLD)<=14*86400000);
+ assert.ok(end-Date.parse(RENEW_FROM)<=32*86400000);
+ });
+
+
+test("released Monday full-retention lane renews only existing clock pair through exact outcome tail",async()=>{
+ const released={...env,TRAVNR_RELAY_MODE:"MULTI_LANE",TRAVNR_RELAY_PRIMARY_ENABLED:"1",TRAVNR_RELAY_ROLLING_ENABLED:"1",TRAVNR_EXTERNAL_LANE_COMMISSION_APPROVED:"1",TRAVNR_RELAY_FULL_RETENTION_APPROVED:"1",TRAVNR_APPROVED_TARGET_MAIN_SHA:"781140cde71af3b72376c2db9f0fdb84204a2b7c",TRAVNR_ROLLING_POLICY_UNTIL_UTC:"2026-12-29T04:00:00.000Z"};
+ const f=fixture(),before=[...f.store.values()].map(j=>structuredClone(j));
+ const a=await renewPair({...arg,env:released},f);
+ assert.equal(a.mode,"RELEASED");
+ assert.equal(a.status,"EXACT_PAIR_FIXED_LEASE_EXTENDED_VERIFIED");
+ assert.equal(a.cronMutations,2);assert.equal(a.targetDispatches,0);assert.equal(a.paidAuthorityGranted,false);
+ for(const old of before){
+  const next=f.store.get(old.jobId);
+  assert.deepEqual(next,{...old,schedule:{...old.schedule,expiresAt:20261230080000}});
+ }
+ const outside=fixture();
+ await assert.rejects(renewPair({...arg,env:{...released,TRAVNR_ROLLING_POLICY_UNTIL_UTC:"2026-12-30T08:00:01.000Z"}},outside),/MODE_OR_POLICY/);
+ assert.equal(outside.calls.length,0);
 });
