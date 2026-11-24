@@ -16,7 +16,7 @@ export async function forward(e,{fetcher=fetch,now=Date.now,emit=()=>{}}={}){
  const headers={Authorization:"Bearer "+e.GITHUB_TOKEN,Accept:"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"};
  let calls=0,attempted=false;
  const req=async(p,method="GET",body)=>{
-  if(++calls>24||now()-start>90000||!p.startsWith("/")||p.startsWith("//"))hold("BOUND");
+  if(++calls>32||now()-start>90000||!p.startsWith("/")||p.startsWith("//"))hold("BOUND");
   const r=await fetcher(root+p,{method,headers:{...headers,...(body?{"Content-Type":"application/json"}:{})},...(body?{body:JSON.stringify(body)}:{}),redirect:"error",signal:AbortSignal.timeout(10000)});
   if(!r.ok)hold(method+"_HTTP_"+r.status);
   return r.json();
@@ -27,6 +27,13 @@ export async function forward(e,{fetcher=fetch,now=Date.now,emit=()=>{}}={}){
   if((await req("/git/ref/heads/main")).object?.sha!==pin)hold("MAIN_DRIFT");
   const run=await req("/actions/runs/"+self);
   if(run.id!==self||run.head_sha!==pin||run.display_title!=="TRAVNR EXTERNAL CLOCK ROLLING_ROOT"||run.path!==".github/workflows/external-clock.yml"||run.head_branch!=="main"||run.run_attempt!==1||run.status!=="in_progress"||run.event!=="workflow_dispatch")hold("SELF_IDENTITY");
+  // A failed earlier forwarding attempt may represent an uncertain POST.
+  // Never infer that an absent controller run authorizes a fresh dispatch.
+  for(const status of ["failure","cancelled","timed_out","action_required","stale","neutral"]){
+   const q=await req("/actions/workflows/external-clock.yml/runs?branch=main&event=workflow_dispatch&status="+status+"&per_page=100&created="+encodeURIComponent(">="+new Date(epoch).toISOString()));
+   if(!Number.isSafeInteger(q.total_count)||q.total_count<0||q.total_count>100||q.workflow_runs?.length!==q.total_count||new Set(q.workflow_runs.map(x=>x.id)).size!==q.total_count)hold("FORWARD_HISTORY_INCOMPLETE");
+   if(q.workflow_runs.some(x=>x.display_title==="TRAVNR EXTERNAL CLOCK ROLLING_ROOT"))return result("ISOLATED_FORWARD_PRIOR_FAILURE_REVIEW",{dispatches:0});
+  }
   for(const status of ["failure","cancelled","timed_out","action_required","stale","neutral","skipped","queued","in_progress","waiting","requested","pending"]){
    const active=["queued","in_progress","waiting","requested","pending"].includes(status);
    const q=await req("/actions/workflows/"+wf+"/runs?branch=main&status="+status+"&per_page=100"+(active?"":"&created="+encodeURIComponent(">="+new Date(epoch).toISOString())));
