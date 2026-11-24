@@ -296,7 +296,7 @@ export async function runDirectTick(env,{now=Date.now,sleep=ms=>new Promise(r=>s
     await journal.reconcile({token:env.TRAVNR_TARGET_ACTIONS_TOKEN,fetcher:api,sleep});
     try{
      const snapshots=[];
-     const result=await readP6RollingGithubSnapshot({sha:a.sha,epoch,token:env.GITHUB_TOKEN,now,fetcher:api,sleep,
+     const result=await readP6RollingGithubSnapshot({sha:a.sha,epoch,token:env.TRAVNR_TARGET_ACTIONS_TOKEN,now,fetcher:api,sleep,
       directRecovery:true,earlyDrawHistoryEpoch,verifySnapshot:(r,x)=>{journal.assertVisible(r,x);snapshots.push(x);},scheduleEvidenceCache:cache});
      if(result.plan.status!=="REVIEWED_ROLLING_WAVE_PLAN_NO_GO"){
       emit({status:"DIRECT_ROUTE_HISTORY_HOLD_DIAGNOSTIC",attempt:i+1,blocked:result.plan.assessments.filter(x=>x.state.startsWith("HOLD_")).map(x=>({lane:x.lane,state:x.state,runId:x.runId??null}))});
@@ -316,7 +316,7 @@ export async function runDirectTick(env,{now=Date.now,sleep=ms=>new Promise(r=>s
   const hints=assessP6RollingCalendarHints(a.calendar,now());
   if(hints.status!=="REVIEWED_CALENDAR_WAKE_HINT_ONLY_NO_GO")hold("CALENDAR_UNKNOWN");
   const plan=restrictP6RollingWave(observation.plan,hints.hints.filter(x=>x.mayNeedWork).map(x=>x.lane));
-  const wave=await dispatchP6ReviewedRollingWave(plan,{sha:a.sha,approvedSha:a.sha,releaseApproved:true,token:env.GITHUB_TOKEN,
+  const wave=await dispatchP6ReviewedRollingWave(plan,{sha:a.sha,approvedSha:a.sha,releaseApproved:true,token:env.TRAVNR_TARGET_ACTIONS_TOKEN,
    now,deadline:Math.min(start+3*MIN,deadline-3*MIN),fetcher:api,mayStartAttempt:()=>requests<220,
    recheckRoute:async r=>journal.assertVisible(r,await observation.recheckRoute(r)),
    onEvidence:e=>{if(e.status==="DISPATCH_ATTEMPT_BEFORE_ACK")attempted=true;journal.evidence(e);}});
