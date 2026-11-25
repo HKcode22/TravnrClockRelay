@@ -199,6 +199,20 @@ export async function runDirectTick(env,{now=Date.now,sleep=ms=>new Promise(r=>s
    x[key].length!==Math.min(cap,x.total_count))hold("HISTORY_RESPONSE_INCOMPLETE");
   return x[key];
  }
+ // Match the bounded direct-target count-only GET repair. Retain the exact
+ // original repository/token scope and every identity/custody check.
+ async function getBounded(path,key,cap=100,root=false){
+  for(let i=0;i<3;i++){
+   const x=await get(path,root);
+   const mismatch=Number.isSafeInteger(x?.total_count)&&x.total_count>=0&&
+    Array.isArray(x[key])&&x[key].length!==Math.min(cap,x.total_count);
+   if(mismatch&&i<2&&requests<360&&now()+15000<deadline-12000){
+    emit({status:"DIRECT_ROOT_HISTORY_COUNT_GET_RETRY",attempt:i+1,collection:key,scope:root?"RELAY":"TARGET"});
+    await sleep(1000*(i+1));continue;
+   }
+   return {response:x,rows:bounded(x,key,cap)};
+  }
+ }
  async function negativeHistory(){
   // All negative conclusions since the independently approved activation,
   // not only the three-hour scheduling preview. A historical HOLD is NOT
@@ -210,31 +224,29 @@ export async function runDirectTick(env,{now=Date.now,sleep=ms=>new Promise(r=>s
    // One complete repository-wide negative sweep per conclusion usually
    // replaces nine requests. If >100 rows, never infer absence from the first
    // page: check complete per-workflow counts for the same exact time scope.
-   const list=await get("/actions/runs?branch=main&status="+status+"&per_page=100&created="+encodeURIComponent(">="+iso(a.since)));
-   const rs=bounded(list,"workflow_runs");
+   const {response:list,rows:rs}=await getBounded("/actions/runs?branch=main&status="+status+"&per_page=100&created="+encodeURIComponent(">="+iso(a.since)),"workflow_runs");
    if(list.total_count<=100){
     if(new Set(rs.map(x=>x.id)).size!==rs.length||rs.some(x=>!validId(x.id)||typeof x.path!=="string"||
        x.head_branch!=="main"||x.status!=="completed"||x.conclusion!==status||
        !Number.isFinite(Date.parse(x.created_at))||Date.parse(x.created_at)<a.since))hold("NEGATIVE_HISTORY_IDENTITY");
     if(rs.some(x=>allowed.has(x.path)))hold("PRIOR_UNSUCCESSFUL_RUN_REVIEW");
    }else{
-    const counts=await Promise.all(targets.map(wf=>get(q(wf,status))));
-    for(const x of counts){bounded(x,"workflow_runs",1);if(x.total_count!==0)hold("PRIOR_UNSUCCESSFUL_RUN_REVIEW");}
+    const counts=await Promise.all(targets.map(wf=>getBounded(q(wf,status),"workflow_runs",1)));
+    for(const {response:x} of counts){if(x.total_count!==0)hold("PRIOR_UNSUCCESSFUL_RUN_REVIEW");}
    }
   }
-  for(const status of failures){const x=await get(q(DIRECT_WF,status),true);bounded(x,"workflow_runs",1);if(x.total_count!==0)hold("PRIOR_RELAY_CONTROLLER_FAILURE_REVIEW");}
-  const skip=await get(q(DIRECT_WF,"skipped"),true);bounded(skip,"workflow_runs",1);
+  for(const status of failures){const {response:x}=await getBounded(q(DIRECT_WF,status),"workflow_runs",1,true);if(x.total_count!==0)hold("PRIOR_RELAY_CONTROLLER_FAILURE_REVIEW");}
+  const {response:skip}=await getBounded(q(DIRECT_WF,"skipped"),"workflow_runs",1,true);
   if(skip.total_count!==0)hold("PRIOR_DIRECT_GATE_SKIPPED_REVIEW");
  }
  async function selfAndPredecessor(){
   const self=await get("/actions/runs/"+a.id,true);
   if(!exactRoot(self)||self.id!==a.id||self.status!=="in_progress"||self.conclusion!==null)hold("ROOT_IDENTITY");
 
-  const p=await get(q(DIRECT_WF,"success"),true);const rows=bounded(p,"workflow_runs",1);
+  const {rows}=await getBounded(q(DIRECT_WF,"success"),"workflow_runs",1,true);
   if(rows.length){
    const r=rows[0];if(!exactRoot(r)||r.id===a.id||r.status!=="completed"||r.conclusion!=="success")hold("PREDECESSOR_IDENTITY");
-   const jobs=await get("/actions/runs/"+r.id+"/jobs?filter=latest&per_page=100",true);
-   const js=bounded(jobs,"jobs");
+   const {response:jobs,rows:js}=await getBounded("/actions/runs/"+r.id+"/jobs?filter=latest&per_page=100","jobs",100,true);
    if(jobs.total_count!==2||new Set(js.map(j=>j.id)).size!==2||
       !js.every(j=>validId(j.id)&&j.run_id===r.id&&j.head_sha===a.controllerSha&&j.run_attempt===1&&j.status==="completed")||
       !["offline-isolated-controller"].every(name=>js.filter(j=>j.name===name&&j.conclusion==="skipped"&&
@@ -245,8 +257,7 @@ export async function runDirectTick(env,{now=Date.now,sleep=ms=>new Promise(r=>s
       directDisposition(m[0].steps)===null)hold("PREDECESSOR_NOT_TERMINAL");
    const disposition=directDisposition(m[0].steps);
    async function artifact(){
-    const xs=await get("/actions/runs/"+r.id+"/artifacts?per_page=100",true);
-    const rows=bounded(xs,"artifacts");
+    const {response:xs,rows}=await getBounded("/actions/runs/"+r.id+"/artifacts?per_page=100","artifacts",100,true);
     if(xs.total_count!==1||rows[0]?.name!=="p6-direct-terminal-"+r.id||rows[0].expired!==false||
        !validId(rows[0].id)||!Number.isSafeInteger(rows[0].size_in_bytes)||rows[0].size_in_bytes<1||
        rows[0].size_in_bytes>65536||!/^sha256:[a-f0-9]{64}$/.test(rows[0].digest??"")||
@@ -264,12 +275,10 @@ export async function runDirectTick(env,{now=Date.now,sleep=ms=>new Promise(r=>s
   // Root custody is isolated in the relay repository. Target legacy roots
   // must be absent even before the newly reviewed epoch; no overlap.
   for(const status of states){
-   const x=await get("/actions/workflows/"+DIRECT_WF+"/runs?branch=main&status="+status+"&per_page=100",true);
-   const rows=bounded(x,"workflow_runs");if(x.total_count>100||rows.some(r=>!exactRoot(r)||r.status!==status||r.id!==a.id))hold("OVERLAPPING_RELAY_CONTROLLER");
+   const {response:x,rows}=await getBounded("/actions/workflows/"+DIRECT_WF+"/runs?branch=main&status="+status+"&per_page=100","workflow_runs",100,true);if(x.total_count>100||rows.some(r=>!exactRoot(r)||r.status!==status||r.id!==a.id))hold("OVERLAPPING_RELAY_CONTROLLER");
    if(status==="in_progress"&&!rows.some(r=>r.id===a.id))hold("SELF_NOT_VISIBLE");
    for(const wf of [TARGET_DIRECT_WF,OLD]){
-    const legacy=await get("/actions/workflows/"+wf+"/runs?branch=main&status="+status+"&per_page=100");
-    bounded(legacy,"workflow_runs");if(legacy.total_count!==0)hold("OVERLAPPING_TARGET_CONTROLLER");
+    const {response:legacy}=await getBounded("/actions/workflows/"+wf+"/runs?branch=main&status="+status+"&per_page=100","workflow_runs");if(legacy.total_count!==0)hold("OVERLAPPING_TARGET_CONTROLLER");
    }
   }
  }
