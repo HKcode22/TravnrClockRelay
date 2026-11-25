@@ -344,6 +344,16 @@ export function auditLanes(layout){
  if(layout==="CLOCK_ONLY")return ["CLOCK_ONLY"];
  HOLD("AUDIT_LAYOUT");
 }
+/** During independently commissioned dual-lane operation, a green
+ * PRIMARY_ONLY probe cannot represent managed-pair health. Require the
+ * existing explicit pair configuration; never silently enlarge permissions. */
+export function requireManagedAuditCoverage(e,mode,layout){
+ if(mode==="RECENT"&&e.TRAVNR_RELAY_MODE==="MULTI_LANE"&&
+    e.TRAVNR_RELAY_PRIMARY_ENABLED==="1"&&e.TRAVNR_RELAY_ROLLING_ENABLED==="1"&&
+    e.TRAVNR_RELAY_ROLLING_ROUTE==="INDEPENDENT_WAKE"&&layout!=="RECOVERY_PAIR")
+  HOLD("PAIR_AUDIT_LAYOUT_REQUIRED");
+ return layout;
+}
 async function main(){
  const e=process.env,local=process.argv[2]==="--owner-audit-pilot",repaired=process.argv[2]==="--shadow-rekey",shadow=process.argv[2]==="--shadow-pair"||repaired,mode=local?"PILOT":shadow?"SHADOW":e.TRAVNR_CRON_AUDIT_MODE,shadowRecent=mode==="SHADOW_RECENT";
  if(local?e.GITHUB_ACTIONS==="true":e.GITHUB_ACTIONS!=="true"||e.GITHUB_REPOSITORY!==REPO||e.GITHUB_REF!=="refs/heads/main"||
@@ -353,6 +363,7 @@ async function main(){
  if(e.DATABASE_URL||e.RAPIDAPI_KEY||e.AERODATABOX_API_KEY||e.TRAVNR_TARGET_ACTIONS_TOKEN||e.NODE_TLS_REJECT_UNAUTHORIZED==="0"||
     typeof e.TRAVNR_CRON_ACCOUNT_KEY!=="string"||e.TRAVNR_CRON_ACCOUNT_KEY.length<16)HOLD("SECRET_SCOPE");
  const layout=shadow||shadowRecent?"SHADOW_PAIR":mode==="PILOT"?"CLOCK_ONLY":e.TRAVNR_CRON_AUDIT_LAYOUT||"CLOCK_ONLY";
+ requireManagedAuditCoverage(e,mode,layout);
  if(!["CLOCK_ONLY","PRIMARY_ONLY","RECOVERY_PAIR","SHADOW_PAIR"].includes(layout))HOLD("AUDIT_LAYOUT");
  const recoveryLayout=layout==="PRIMARY_ONLY"||layout==="RECOVERY_PAIR";
  
