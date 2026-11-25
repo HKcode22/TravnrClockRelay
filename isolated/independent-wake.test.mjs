@@ -5,16 +5,21 @@ const target="9".repeat(40),relay="a".repeat(40),clock=Date.parse("2026-11-25T04
 const env={GITHUB_ACTIONS:"true",GITHUB_REPOSITORY:"HKcode22/TravnrClockRelay",GITHUB_REF:"refs/heads/main",
  GITHUB_EVENT_NAME:"workflow_dispatch",GITHUB_RUN_ATTEMPT:"1",GITHUB_RUN_ID:"12345",GITHUB_SHA:relay,
  P6_RELAY_APPROVED_EXECUTABLE_SHA:relay,TRAVNR_RELAY_MODE:"MULTI_LANE",TRAVNR_RELAY_LANE:"ROLLING_ROOT",
- TRAVNR_RELAY_ROLLING_ROUTE:"INDEPENDENT_WAKE",TRAVNR_RELAY_ROLLING_ENABLED:"1",P6_RELAY_INDEPENDENT_WAKE_APPROVED:"1",
+ TRAVNR_RELAY_ROLLING_ROUTE:"INDEPENDENT_WAKE",TRAVNR_RELAY_ROLLING_ENABLED:"1",
  TRAVNR_TARGET_FORWARD_ENV_READY:"1",TRAVNR_APPROVED_TARGET_MAIN_SHA:target,TRAVNR_ROLLING_POLICY_FROM_UTC:"2026-11-23T00:00:00.000Z",
  TRAVNR_ROLLING_POLICY_UNTIL_UTC:"2026-12-26T00:00:00.000Z",TRAVNR_TARGET_ACTIONS_TOKEN:"test-token-not-real-012345"};
-function fixture({fault,drift=false}={}){
+function fixture({fault,drift=false,busy,readFail}={}){
  const calls=[];
  const fetcher=async(url,init)=>{
   calls.push({url,method:init.method,body:init.body});
   if(init.method==="GET"){
-   assert(url.endsWith("/git/ref/heads/main"),"no history or predecessor requests");
-   return Response.json({object:{sha:drift?"0".repeat(40):target}});
+   if(url.endsWith("/git/ref/heads/main"))return Response.json({object:{sha:drift?"0".repeat(40):target}});
+   const u=new URL(url),r=routes.find(r=>u.pathname.endsWith("/"+r.workflow+"/runs"));
+   assert(r);assert(["queued","in_progress","waiting","requested","pending"].includes(u.searchParams.get("status")));
+   assert.equal(u.searchParams.get("per_page"),"1");
+   if(r.lane===readFail)throw Error("fixture active read unavailable");
+   // Inconsistent page length is deliberately not a global hold.
+   return Response.json({total_count:r.lane===busy?2:0,workflow_runs:[]});
   }
   const route=routes.find(r=>url.endsWith("/"+r.workflow+"/dispatches"));
   assert(route);
@@ -28,7 +33,7 @@ function fixture({fault,drift=false}={}){
 }
 test("one independent wake per reviewed route, no run-history requests",async()=>{
  const f=fixture(),out=await independentWake(env,{fetcher:f.fetcher,now:()=>clock});
- assert.equal(out.lanes.length,7);assert.equal(f.calls.length,8);
+ assert.equal(out.lanes.length,7);assert.equal(f.calls.length,43);
  assert.equal(new Set(f.calls.filter(x=>x.method==="POST").map(x=>x.url)).size,7);
  assert(out.lanes.every(x=>x.status==="ACK_NOT_COLLECTION_PROOF"));
  assert.equal(out.providerCalls,0);assert.equal(out.paidAuthorityGranted,false);
@@ -37,10 +42,10 @@ test("uncertain SOURCE/POST parent acknowledgment does not block other lanes and
  const f=fixture({fault:"SOURCE_POST"}),out=await independentWake(env,{fetcher:f.fetcher,now:()=>clock});
  assert.equal(out.lanes[0].status,"ACK_UNKNOWN_OR_REFUSED");
  assert(out.lanes.slice(1).every(x=>x.status==="ACK_NOT_COLLECTION_PROOF"));
- assert.equal(f.calls.length,8);
+ assert.equal(f.calls.length,43);
 });
 test("separate executable pin, target main drift, scope, credential and policy checks",async()=>{
- for(const e of [{...env,GITHUB_RUN_ATTEMPT:"2"},{...env,P6_RELAY_INDEPENDENT_WAKE_APPROVED:"0"},{...env,DATABASE_URL:"not allowed"},{...env,TRAVNR_RELAY_ROLLING_ROUTE:"DIRECT_TICK"},{...env,P6_RELAY_APPROVED_EXECUTABLE_SHA:target}]){
+ for(const e of [{...env,GITHUB_RUN_ATTEMPT:"2"},{...env,TRAVNR_RELAY_ROLLING_ENABLED:"0"},{...env,DATABASE_URL:"not allowed"},{...env,TRAVNR_RELAY_ROLLING_ROUTE:"DIRECT_TICK"},{...env,P6_RELAY_APPROVED_EXECUTABLE_SHA:target}]){
   const f=fixture();await assert.rejects(independentWake(e,{fetcher:f.fetcher,now:()=>clock}),/SCOPE/);assert.equal(f.calls.length,0);
  }
  const f=fixture({drift:true});await assert.rejects(independentWake(env,{fetcher:f.fetcher,now:()=>clock}),/TARGET_MAIN_DRIFT/);assert.equal(f.calls.length,1);
@@ -48,4 +53,12 @@ test("separate executable pin, target main drift, scope, credential and policy c
 test("early draw only near original six-slot clock, all other lanes unaffected",async()=>{
  const f=fixture(),out=await independentWake(env,{fetcher:f.fetcher,now:()=>Date.parse("2026-11-25T03:50:00.000Z")});
  assert.equal(out.lanes.length,6);assert(!out.lanes.some(x=>x.lane==="EARLY_DRAW"));
+});
+
+test("active count mismatch is local; an unavailable active read defers only its own route",async()=>{
+ const f=fixture({busy:"SOURCE_POST",readFail:"T24"}),out=await independentWake(env,{fetcher:f.fetcher,now:()=>clock});
+ assert.equal(out.lanes[0].status,"ACTIVE_DEFERRED");
+ assert.equal(out.lanes.find(x=>x.lane==="T24").status,"ACTIVE_READ_UNAVAILABLE_DEFERRED");
+ assert(out.lanes.filter(x=>!["SOURCE_POST","T24"].includes(x.lane)).every(x=>x.status==="ACK_NOT_COLLECTION_PROOF"));
+ assert.equal(f.calls.filter(x=>x.method==="POST").length,5);
 });
