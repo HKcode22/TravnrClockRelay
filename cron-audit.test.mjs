@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {PILOT,REPO,WF,config,validateJob,planned,classify,ack,verifyReceipt,samples,audit,observeTargetStep,leaseHealth,shadowConfigs,repairedShadowConfigs,shadowRecentConfigs,auditLanes,SHADOW_ACTIVATION_PIN,continuityConfig} from "./cron-audit.mjs";
+import {PILOT,REPO,WF,config,validateJob,planned,classify,ack,verifyReceipt,samples,audit,observeTargetStep,leaseHealth,shadowConfigs,repairedShadowConfigs,shadowRecentConfigs,auditLanes,requireManagedAuditCoverage,SHADOW_ACTIVATION_PIN,continuityConfig} from "./cron-audit.mjs";
 const c=PILOT,base="https://api.github.com/repos/"+REPO,url=base+"/actions/workflows/"+WF+"/dispatches";
 const now=Date.parse("2026-11-18T07:56:00Z"),slots=planned(c,"PILOT",now),p=slots[0];
 const row=(s=p,n=1)=>({jobId:c.jobId,datePlanned:s,date:s+1,jitter:1200,identifier:"history-"+n,url,status:1,httpStatus:200});
@@ -217,4 +217,12 @@ test("new independent wake audit accepts six real route ACKs without certifying 
  assert.equal(v({...receipt,lanes:[{lane:"SOURCE_POST",status:"ACK_UNKNOWN_OR_REFUSED"},...receipt.lanes.slice(1)]}).status,"RELAY_INDEPENDENT_WAKE_REVIEW_REQUIRED");
  for(const bad of [{targetSha:"b".repeat(40)},{providerCalls:1},{paidAuthorityGranted:true},{lanes:receipt.lanes.slice(1)},{lanes:[{...receipt.lanes[0],runId:201},...receipt.lanes.slice(1)]}])assert.throws(()=>v({...receipt,...bad}),/INDEPENDENT_WAKE_/);
  assert.throws(()=>v(receipt,{...jobs,jobs:[{...j,steps:[]},...jobs.jobs.slice(1)]}),/INDEPENDENT_WAKE_JOB_SCOPE/);
+});
+
+test("an armed independent pair cannot report a primary-only audit as complete",()=>{
+ const e={TRAVNR_RELAY_MODE:"MULTI_LANE",TRAVNR_RELAY_PRIMARY_ENABLED:"1",TRAVNR_RELAY_ROLLING_ENABLED:"1",TRAVNR_RELAY_ROLLING_ROUTE:"INDEPENDENT_WAKE"};
+ assert.equal(requireManagedAuditCoverage(e,"RECENT","RECOVERY_PAIR"),"RECOVERY_PAIR");
+ assert.throws(()=>requireManagedAuditCoverage(e,"RECENT","PRIMARY_ONLY"),/PAIR_AUDIT_LAYOUT_REQUIRED/);
+ assert.equal(requireManagedAuditCoverage({...e,TRAVNR_RELAY_ROLLING_ENABLED:"0"},"RECENT","PRIMARY_ONLY"),"PRIMARY_ONLY");
+ assert.equal(requireManagedAuditCoverage(e,"PILOT","CLOCK_ONLY"),"CLOCK_ONLY");
 });
