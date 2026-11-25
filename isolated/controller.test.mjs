@@ -152,3 +152,25 @@ test("active sweep fallback continues with complete route-specific evidence only
  };
  const o=await runDirectTick(f.env,f.options);assert.equal(mismatches,3);assert.equal(o.status,"DIRECT_WAVE_TERMINAL_NOT_COLLECTION_PROOF");assert.equal(o.verifiedTerminal,f.posts());
 });
+
+test("root and target count-only GET retry preserves independent token scopes and no overlap",async()=>{
+ for(const scope of ["RELAY","TARGET"]){
+  for(const persistent of [false,true]){
+   const f=fixture(),original=f.options.fetcher;let n=0;
+   f.options.fetcher=async(url,opt)=>{
+    const u=new URL(url),path=u.pathname;
+    const scoped=scope==="RELAY"?path.includes("/TravnrClockRelay/")&&path.endsWith("/"+DIRECT_WF+"/runs"):
+     path.includes("/ReplitTranvr/")&&path.endsWith("/phase6-direct-recovery-tick.yml/runs");
+    if(opt.method==="GET"&&scoped&&u.searchParams.get("status")==="in_progress"&&(persistent||n===0)){
+     assert.equal(opt.headers.Authorization,scope==="RELAY"?"Bearer synthetic-test-token-no-access":"Bearer synthetic-target-token-no-access");
+     n++;return {ok:true,status:200,json:async()=>({total_count:1,workflow_runs:[]})};
+    }
+    return original(url,opt);
+   };
+   const out=await runDirectTick(f.env,f.options);
+   if(persistent){assert.equal(n,3);assert.equal(f.posts(),0);assert.equal(out.status,"DIRECT_PREFLIGHT_HOLD_NO_POST");}
+   else{assert.equal(n,1);assert(f.posts()>0);assert.equal(out.verifiedTerminal,f.posts());}
+   assert(f.events.some(e=>e.status==="DIRECT_ROOT_HISTORY_COUNT_GET_RETRY"&&e.scope===scope));
+  }
+ }
+});
