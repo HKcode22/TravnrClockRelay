@@ -1,0 +1,51 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import {independentWake,routes} from "./independent-wake.mjs";
+const target="9".repeat(40),relay="a".repeat(40),clock=Date.parse("2026-11-25T04:20:00.000Z");
+const env={GITHUB_ACTIONS:"true",GITHUB_REPOSITORY:"HKcode22/TravnrClockRelay",GITHUB_REF:"refs/heads/main",
+ GITHUB_EVENT_NAME:"workflow_dispatch",GITHUB_RUN_ATTEMPT:"1",GITHUB_RUN_ID:"12345",GITHUB_SHA:relay,
+ P6_RELAY_APPROVED_EXECUTABLE_SHA:relay,TRAVNR_RELAY_MODE:"MULTI_LANE",TRAVNR_RELAY_LANE:"ROLLING_ROOT",
+ TRAVNR_RELAY_ROLLING_ROUTE:"INDEPENDENT_WAKE",TRAVNR_RELAY_ROLLING_ENABLED:"1",P6_RELAY_INDEPENDENT_WAKE_APPROVED:"1",
+ TRAVNR_TARGET_FORWARD_ENV_READY:"1",TRAVNR_APPROVED_TARGET_MAIN_SHA:target,TRAVNR_ROLLING_POLICY_FROM_UTC:"2026-11-23T00:00:00.000Z",
+ TRAVNR_ROLLING_POLICY_UNTIL_UTC:"2026-12-26T00:00:00.000Z",TRAVNR_TARGET_ACTIONS_TOKEN:"test-token-not-real-012345"};
+function fixture({fault,drift=false}={}){
+ const calls=[];
+ const fetcher=async(url,init)=>{
+  calls.push({url,method:init.method,body:init.body});
+  if(init.method==="GET"){
+   assert(url.endsWith("/git/ref/heads/main"),"no history or predecessor requests");
+   return Response.json({object:{sha:drift?"0".repeat(40):target}});
+  }
+  const route=routes.find(r=>url.endsWith("/"+r.workflow+"/dispatches"));
+  assert(route);
+  assert.deepEqual(JSON.parse(init.body),{ref:"main",return_run_details:true,inputs:route.inputs});
+  if(route.lane===fault)throw Error("synthetic uncertain dispatch");
+  const id=12345+calls.length;
+  return Response.json({workflow_run_id:id,run_url:"https://api.github.com/repos/HKcode22/ReplitTranvr/actions/runs/"+id,
+    html_url:"https://github.com/HKcode22/ReplitTranvr/actions/runs/"+id});
+ };
+ return {calls,fetcher};
+}
+test("one independent wake per reviewed route, no run-history requests",async()=>{
+ const f=fixture(),out=await independentWake(env,{fetcher:f.fetcher,now:()=>clock});
+ assert.equal(out.lanes.length,7);assert.equal(f.calls.length,8);
+ assert.equal(new Set(f.calls.filter(x=>x.method==="POST").map(x=>x.url)).size,7);
+ assert(out.lanes.every(x=>x.status==="ACK_NOT_COLLECTION_PROOF"));
+ assert.equal(out.providerCalls,0);assert.equal(out.paidAuthorityGranted,false);
+});
+test("uncertain SOURCE/POST parent acknowledgment does not block other lanes and never retransmits",async()=>{
+ const f=fixture({fault:"SOURCE_POST"}),out=await independentWake(env,{fetcher:f.fetcher,now:()=>clock});
+ assert.equal(out.lanes[0].status,"ACK_UNKNOWN_OR_REFUSED");
+ assert(out.lanes.slice(1).every(x=>x.status==="ACK_NOT_COLLECTION_PROOF"));
+ assert.equal(f.calls.length,8);
+});
+test("separate executable pin, target main drift, scope, credential and policy checks",async()=>{
+ for(const e of [{...env,GITHUB_RUN_ATTEMPT:"2"},{...env,P6_RELAY_INDEPENDENT_WAKE_APPROVED:"0"},{...env,DATABASE_URL:"not allowed"},{...env,TRAVNR_RELAY_ROLLING_ROUTE:"DIRECT_TICK"},{...env,P6_RELAY_APPROVED_EXECUTABLE_SHA:target}]){
+  const f=fixture();await assert.rejects(independentWake(e,{fetcher:f.fetcher,now:()=>clock}),/SCOPE/);assert.equal(f.calls.length,0);
+ }
+ const f=fixture({drift:true});await assert.rejects(independentWake(env,{fetcher:f.fetcher,now:()=>clock}),/TARGET_MAIN_DRIFT/);assert.equal(f.calls.length,1);
+});
+test("early draw only near original six-slot clock, all other lanes unaffected",async()=>{
+ const f=fixture(),out=await independentWake(env,{fetcher:f.fetcher,now:()=>Date.parse("2026-11-25T03:50:00.000Z")});
+ assert.equal(out.lanes.length,6);assert(!out.lanes.some(x=>x.lane==="EARLY_DRAW"));
+});
