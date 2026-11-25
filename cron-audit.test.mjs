@@ -204,3 +204,17 @@ test("direct read-only verify proves actual step while paid direct job is skippe
  assert.equal((await observeTargetStep(q,n,get)).status,"RELAY_TARGET_READONLY_DIRECT_VERIFY_EXECUTED_NO_COLLECTION_PROOF");
  await assert.rejects(observeTargetStep({...q,directVerify:false,directTick:true},n,get),/TARGET_RUN_IDENTITY/);
 });
+
+test("new independent wake audit accepts six real route ACKs without certifying collection",()=>{
+ const a=mk(),targetPin="a".repeat(40),q={...c,lane:"ROLLING_ROOT",independentWake:true,targetPin},
+ run={...a.run,display_title:"TRAVNR EXTERNAL CLOCK ROLLING_ROOT"};
+ const j={...a.jobs.jobs[0],name:"independent-wake",steps:[{name:"Wake each independent reviewed worker route once",status:"completed",conclusion:"success"}]};
+ const jobs={total_count:4,jobs:[j,...["offline-tests","target-forward","independent-pulse"].map((name,i)=>({...j,id:j.id+i+1,name,conclusion:"skipped",steps:[]}))]};
+ const receipt={status:"INDEPENDENT_WAKE_COMPLETE_NOT_COLLECTION_PROOF",relayRunId:101,targetSha:targetPin,providerCalls:0,databaseWrites:0,paidAuthorityGranted:false,lanes:["SOURCE_POST","PRE_ENROLLMENT","T24","LATER_PRE","DAILY_PREPARE","PRE_RECOVERY"].map((lane,i)=>({lane,status:"ACK_NOT_COLLECTION_PROOF",runId:200+i}))};
+ const v=(x=receipt,k=jobs)=>verifyReceipt(q,a.r,101,run,k,JSON.stringify(x));
+ const out=v();assert.equal(out.status,"RELAY_INDEPENDENT_WAKE_ACKS_OBSERVED_NOT_COLLECTION_PROOF");assert.equal(out.independentAcknowledgedLanes,6);assert.equal(out.targetCollectionVerified,false);
+ assert.equal(v({...receipt,lanes:[{lane:"SOURCE_POST",status:"ACTIVE_DEFERRED"},...receipt.lanes.slice(1)]}).independentActiveDeferredLanes,1);
+ assert.equal(v({...receipt,lanes:[{lane:"SOURCE_POST",status:"ACK_UNKNOWN_OR_REFUSED"},...receipt.lanes.slice(1)]}).status,"RELAY_INDEPENDENT_WAKE_REVIEW_REQUIRED");
+ for(const bad of [{targetSha:"b".repeat(40)},{providerCalls:1},{paidAuthorityGranted:true},{lanes:receipt.lanes.slice(1)},{lanes:[{...receipt.lanes[0],runId:201},...receipt.lanes.slice(1)]}])assert.throws(()=>v({...receipt,...bad}),/INDEPENDENT_WAKE_/);
+ assert.throws(()=>v(receipt,{...jobs,jobs:[{...j,steps:[]},...jobs.jobs.slice(1)]}),/INDEPENDENT_WAKE_JOB_SCOPE/);
+});

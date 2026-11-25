@@ -77,6 +77,7 @@ export function ack(c,r,d){
  if(!id(a.workflow_run_id)||a.run_url!==GH+"/actions/runs/"+a.workflow_run_id||a.html_url!=="https://github.com/"+REPO+"/actions/runs/"+a.workflow_run_id)HOLD("ACK_IDENTITY");
  return a.workflow_run_id;
 }
+const receiptJob=c=>laneOf(c)==="CLOCK_ONLY"||c.shadow?"independent-pulse":c.independentWake?"independent-wake":"target-forward";
 export function verifyReceipt(c,r,n,run,jobs,log){
  if(c.shadowRecent){
   if(![c.pin,c.activationPin].includes(run?.head_sha))HOLD("RUN_IDENTITY");
@@ -96,9 +97,10 @@ export function verifyReceipt(c,r,n,run,jobs,log){
   if(forward.length!==1||!id(forward[0].id)||forward[0].run_id!==n||forward[0].head_sha!==c.pin||forward[0].run_attempt!==1||
      forward[0].status!=="completed"||forward[0].conclusion!=="skipped"||!(forward[0].steps==null||Array.isArray(forward[0].steps)&&forward[0].steps.length===0))HOLD("SHADOW_FORWARD_NOT_SKIPPED");
  }
- const matches=jobs.jobs.filter(j=>j.name===(laneOf(c)==="CLOCK_ONLY"||c.shadow?"independent-pulse":"target-forward"));
+ const matches=jobs.jobs.filter(j=>j.name===receiptJob(c));
  if(matches.length!==1)HOLD("PULSE_JOB");
  const j=matches[0];
+ if(c.independentWake)return verifyIndependentWakeReceipt(c,r,n,run,j,jobs,log);
  if(laneOf(c)!=="CLOCK_ONLY"&&id(j.id)&&j.status==="completed"&&j.conclusion==="skipped"&&j.run_id===n&&j.head_sha===c.pin&&j.run_attempt===1&&(j.steps==null||j.steps.length===0))return {status:"RELAY_FORWARD_SKIPPED",runId:n};
  if(!id(j.id)||j.head_sha!==c.pin||j.run_id!==n||j.run_attempt!==1||j.status!=="completed"||j.conclusion!=="success"||
     j.steps?.filter(s=>s.name==="Run node cli.mjs"&&s.status==="completed"&&s.conclusion==="success").length!==1)HOLD("PULSE_STEP");
@@ -113,6 +115,35 @@ export function verifyReceipt(c,r,n,run,jobs,log){
     !Number.isSafeInteger(x.creationToObservedMs)||x.creationToObservedMs<0||Math.abs(observed-created-x.creationToObservedMs)>1000||
     created<r.date*1000-5000||observed<created||observed<time(j.started_at)-5000||observed>time(j.completed_at)+1000)HOLD("RECEIPT_SCOPE");
  return {status:c.shadow?"SHADOW_LANE_PROVEN_NO_FORWARD":"CLOCK_ONLY_PROVEN",runId:n,jobId:j.id,plannedToRunnerMs:observed-r.datePlanned*1000,creationToRunnerMs:observed-created};
+}
+function verifyIndependentWakeReceipt(c,r,n,run,j,jobs,log){
+ const names=["offline-tests","independent-pulse","target-forward","independent-wake"];
+ if(laneOf(c)!=="ROLLING_ROOT"||jobs.total_count!==4||
+    new Set(jobs.jobs.map(x=>x.name)).size!==4||new Set(jobs.jobs.map(x=>x.id)).size!==4||
+    !jobs.jobs.every(x=>names.includes(x.name)&&id(x.id)&&x.run_id===n&&x.head_sha===c.pin&&x.run_attempt===1&&x.status==="completed")||
+    jobs.jobs.some(x=>x!==j&&(x.conclusion!=="skipped"||x.steps?.length))||
+    j.conclusion!=="success"||j.steps?.filter(x=>x.name==="Wake each independent reviewed worker route once"&&x.status==="completed"&&x.conclusion==="success").length!==1)HOLD("INDEPENDENT_WAKE_JOB_SCOPE");
+ const hits=String(log).split(/\r?\n/).filter(l=>l.includes('{"status":"INDEPENDENT_WAKE_COMPLETE_NOT_COLLECTION_PROOF"'));
+ if(hits.length!==1)HOLD("INDEPENDENT_WAKE_RECEIPT_COUNT");
+ let x;try{x=JSON.parse(hits[0].slice(hits[0].indexOf('{"status":')).trim())}catch{HOLD("INDEPENDENT_WAKE_JSON")}
+ const required=["SOURCE_POST","PRE_ENROLLMENT","T24","LATER_PRE","DAILY_PREPARE","PRE_RECOVERY"];
+ const namesAllowed=[...required,"EARLY_DRAW"];
+ if(x.relayRunId!==n||x.targetSha!==c.targetPin||x.providerCalls!==0||x.databaseWrites!==0||x.paidAuthorityGranted!==false||
+    !Array.isArray(x.lanes)||![6,7].includes(x.lanes.length)||new Set(x.lanes.map(y=>y.lane)).size!==x.lanes.length||
+    !required.every(k=>x.lanes.some(y=>y.lane===k))||x.lanes.some(y=>!namesAllowed.includes(y.lane)))HOLD("INDEPENDENT_WAKE_RECEIPT_SCOPE");
+ const statuses=["ACK_NOT_COLLECTION_PROOF","ACTIVE_DEFERRED","ACTIVE_READ_UNAVAILABLE_DEFERRED","DEFERRED_DEADLINE","ACK_UNKNOWN_OR_REFUSED"];
+ if(x.lanes.some(y=>!statuses.includes(y.status)||(y.status==="ACK_NOT_COLLECTION_PROOF"? !id(y.runId):y.runId!==undefined)))HOLD("INDEPENDENT_WAKE_LANE_STATUS");
+ const acks=x.lanes.filter(y=>y.status==="ACK_NOT_COLLECTION_PROOF");
+ if(new Set(acks.map(y=>y.runId)).size!==acks.length)HOLD("INDEPENDENT_WAKE_DUPLICATE_ACK");
+ const created=time(run.created_at),started=time(j.started_at),ended=time(j.completed_at);
+ if(created<r.date*1000-5000||started<created||ended<started)HOLD("INDEPENDENT_WAKE_CLOCK");
+ const review=x.lanes.some(y=>!["ACK_NOT_COLLECTION_PROOF","ACTIVE_DEFERRED"].includes(y.status));
+ return {status:review?"RELAY_INDEPENDENT_WAKE_REVIEW_REQUIRED":"RELAY_INDEPENDENT_WAKE_ACKS_OBSERVED_NOT_COLLECTION_PROOF",
+   runId:n,jobId:j.id,plannedToRunnerMs:started-r.datePlanned*1000,creationToRunnerMs:started-created,
+   timingBasis:"GITHUB_JOB_STARTED_AT",independentAcknowledgedLanes:acks.length,
+   independentActiveDeferredLanes:x.lanes.filter(y=>y.status==="ACTIVE_DEFERRED").length,
+   independentReviewLanes:x.lanes.filter(y=>!["ACK_NOT_COLLECTION_PROOF","ACTIVE_DEFERRED"].includes(y.status)).map(y=>y.lane),
+   independentTargetRunIds:acks.map(y=>y.runId),targetCollectionVerified:false};
 }
 function verifyRecoveryOutput(c,r,n,run,j,log){
  const rows=[];
@@ -243,7 +274,7 @@ export async function audit({c,mode,now,cron,gh,logs,targetGh,sampleLimit=3}){
    let jobs,log;
    if(run.status==="completed"&&run.conclusion==="success"){
     jobs=await gh("/actions/runs/"+n+"/jobs?filter=latest&per_page=100");
-    const j=jobs.jobs?.find(v=>v.name===(laneOf(c)==="CLOCK_ONLY"||c.shadow?"independent-pulse":"target-forward"));
+    const j=jobs.jobs?.find(v=>v.name===receiptJob(c));
     if(!id(j?.id))HOLD("PULSE_JOB");
     if(j.conclusion!=="skipped")log=await logs(n,j.id);
    }
@@ -255,7 +286,7 @@ export async function audit({c,mode,now,cron,gh,logs,targetGh,sampleLimit=3}){
  const proven=safe.filter(x=>x.status===(c.shadow?"SHADOW_LANE_PROVEN_NO_FORWARD":"CLOCK_ONLY_PROVEN")),timed=safe.filter(x=>Number.isFinite(x.plannedToRunnerMs)),late=timed.filter(x=>x.plannedToRunnerMs>120000),ackOnly=safe.filter(x=>x.status==="CRON_HTTP_ACK_ONLY");
  const relayTargetAcks=safe.filter(x=>id(x.targetRunId)).length,relayTargetExecutions=safe.filter(x=>x.status==="RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF"||x.status==="RELAY_TARGET_READONLY_DIRECT_VERIFY_EXECUTED_NO_COLLECTION_PROOF").length,relayDefers=safe.filter(x=>x.status==="RELAY_OBSERVED_DEFER_NO_WORK_PROOF").length,
   directKnownActiveCustody=safe.filter(x=>x.status==="RELAY_TARGET_DIRECT_KNOWN_ACTIVE_CUSTODY_NOT_TERMINAL_PROOF").length;
- const bad=safe.filter(x=>!["CLOCK_ONLY_PROVEN","SHADOW_LANE_PROVEN_NO_FORWARD","CRON_HTTP_ACK_ONLY","RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF","RELAY_TARGET_READONLY_DIRECT_VERIFY_EXECUTED_NO_COLLECTION_PROOF","RELAY_TARGET_DIRECT_KNOWN_ACTIVE_CUSTODY_NOT_TERMINAL_PROOF","RELAY_OBSERVED_DEFER_NO_WORK_PROOF"].includes(x.status));
+ const bad=safe.filter(x=>!["CLOCK_ONLY_PROVEN","SHADOW_LANE_PROVEN_NO_FORWARD","CRON_HTTP_ACK_ONLY","RELAY_TARGET_STEP_EXECUTION_VERIFIED_NOT_COLLECTION_PROOF","RELAY_TARGET_READONLY_DIRECT_VERIFY_EXECUTED_NO_COLLECTION_PROOF","RELAY_TARGET_DIRECT_KNOWN_ACTIVE_CUSTODY_NOT_TERMINAL_PROOF","RELAY_OBSERVED_DEFER_NO_WORK_PROOF","RELAY_INDEPENDENT_WAKE_ACKS_OBSERVED_NOT_COLLECTION_PROOF"].includes(x.status));
  const expired=now>=time(c.until)+120000,disabledEarly=now<time(c.until)&&!detail.enabled;
  return {status:"READONLY_CRON_AND_RELAY_AUDIT_NOT_COLLECTION_PROOF",mode,lane:laneOf(c),jobId:c.jobId,relayPin:c.pin,observedUtc:iso(now),auditFirstPlannedUtc:slots.length?iso(slots[0]*1000):null,auditLastPlannedUtc:slots.length?iso(slots.at(-1)*1000):null,expected:slots.length,proven:proven.length,ackOnly:ackOnly.length,relayTargetAcks,relayTargetExecutions,relayDefers,directKnownActiveCustody,unresolved:bad.length,unexpectedRows:unexpected,over120Seconds:late.length,expired,disabledEarly,
   leaseHealth:leaseHealth(c,mode,now),leaseUntilUtc:detail.expiresAt,
@@ -326,8 +357,9 @@ async function main(){
  const recoveryLayout=layout==="PRIMARY_ONLY"||layout==="RECOVERY_PAIR";
  
  const route=e.TRAVNR_RELAY_ROLLING_ROUTE||"DURABLE_ROOT";
- if(!["DURABLE_ROOT","DIRECT_TICK","DIRECT_VERIFY"].includes(route))HOLD("AUDIT_ROLLING_ROUTE");
- const configs=(shadowRecent?shadowRecentConfigs(e):repaired?repairedShadowConfigs(e.TRAVNR_SHADOW_RECEIPT,e.GITHUB_SHA):shadow?shadowConfigs(e.TRAVNR_SHADOW_RECEIPT,e.GITHUB_SHA):auditLanes(layout).map(l=>({...config(e,mode,l),...(recoveryLayout?{targetPin:e.TRAVNR_APPROVED_TARGET_MAIN_SHA,...(l==="ROLLING_ROOT"&&route==="DIRECT_TICK"?{directTick:true}:l==="ROLLING_ROOT"&&route==="DIRECT_VERIFY"?{directVerify:true}:{})}:{})}))).map(c=>({...c,leaseContinuity:e.TRAVNR_LEASE_CONTINUITY_ARMED==="1"&&e.TRAVNR_LEASE_ENV_READY==="1"}));
+ if(!["DURABLE_ROOT","DIRECT_TICK","DIRECT_VERIFY","INDEPENDENT_WAKE"].includes(route))HOLD("AUDIT_ROLLING_ROUTE");
+ if(route==="INDEPENDENT_WAKE"&&(!recoveryLayout||!sha(e.P6_RELAY_APPROVED_EXECUTABLE_SHA)||e.P6_RELAY_APPROVED_EXECUTABLE_SHA!==e.GITHUB_SHA))HOLD("AUDIT_INDEPENDENT_EXECUTABLE_PIN");
+ const configs=(shadowRecent?shadowRecentConfigs(e):repaired?repairedShadowConfigs(e.TRAVNR_SHADOW_RECEIPT,e.GITHUB_SHA):shadow?shadowConfigs(e.TRAVNR_SHADOW_RECEIPT,e.GITHUB_SHA):auditLanes(layout).map(l=>({...config(e,mode,l),...(recoveryLayout?{targetPin:e.TRAVNR_APPROVED_TARGET_MAIN_SHA,...(route==="INDEPENDENT_WAKE"?{pin:e.P6_RELAY_APPROVED_EXECUTABLE_SHA,...(l==="ROLLING_ROOT"?{independentWake:true}:{})}:{}),...(l==="ROLLING_ROOT"&&route==="DIRECT_TICK"?{directTick:true}:l==="ROLLING_ROOT"&&route==="DIRECT_VERIFY"?{directVerify:true}:{})}:{})}))).map(c=>({...c,leaseContinuity:e.TRAVNR_LEASE_CONTINUITY_ARMED==="1"&&e.TRAVNR_LEASE_ENV_READY==="1"}));
  if(recoveryLayout&&!configs.every(c=>sha(c.targetPin)))HOLD("TARGET_AUDIT_PIN_REQUIRED");
  if(new Set(configs.map(x=>x.jobId)).size!==configs.length)HOLD("DUPLICATE_AUDIT_JOB");
  const allowed=new Set(configs.map(x=>String(x.jobId))),max=mode==="PILOT"||shadow?15:["RECOVERY_PAIR","SHADOW_PAIR"].includes(layout)?6:5;
