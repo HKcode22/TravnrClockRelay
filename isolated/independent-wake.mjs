@@ -27,7 +27,7 @@ export function admitIndependentWake(e,clock){
   !sha(e.GITHUB_SHA)||e.P6_RELAY_APPROVED_EXECUTABLE_SHA!==e.GITHUB_SHA||
   e.TRAVNR_RELAY_MODE!=="MULTI_LANE"||e.TRAVNR_RELAY_LANE!=="ROLLING_ROOT"||
   e.TRAVNR_RELAY_ROLLING_ROUTE!=="INDEPENDENT_WAKE"||e.TRAVNR_RELAY_ROLLING_ENABLED!=="1"||
-  e.P6_RELAY_INDEPENDENT_WAKE_APPROVED!=="1"||e.TRAVNR_TARGET_FORWARD_ENV_READY!=="1"||
+  e.TRAVNR_TARGET_FORWARD_ENV_READY!=="1"||
   !sha(e.TRAVNR_APPROVED_TARGET_MAIN_SHA)||e.TRAVNR_APPROVED_TARGET_MAIN_SHA===e.GITHUB_SHA||
   !Number.isFinite(from)||!Number.isFinite(until)||new Date(from).toISOString()!==e.TRAVNR_ROLLING_POLICY_FROM_UTC||
   new Date(until).toISOString()!==e.TRAVNR_ROLLING_POLICY_UNTIL_UTC||clock<from||clock>=until||until-from>60*86400000||
@@ -46,12 +46,31 @@ export async function independentWake(e,{fetcher=fetch,now=Date.now,emit=()=>{}}
  if(!pin.ok||(await pin.json()).object?.sha!==a.targetSha)hold("TARGET_MAIN_DRIFT");
  const utc=new Date(start);
  const out=[];
+ // Active-only observation, not historical completeness. Do not compare a
+ // changing list count to its page length, inspect failed predecessors, or
+ // create another queued run when a live one is visible. A read outage is
+ // local to this lane and automatically clears on the next external pulse.
+ const activeStates=["queued","in_progress","waiting","requested","pending"];
+ async function busy(r){
+  const reads=await Promise.allSettled(activeStates.map(async status=>{
+   const x=await request("/actions/workflows/"+r.workflow+"/runs?branch=main&status="+status+"&per_page=1");
+   if(!x.ok)throw Error("ACTIVE_READ");
+   const j=await x.json();
+   if(!Number.isSafeInteger(j.total_count)||j.total_count<0||!Array.isArray(j.workflow_runs))throw Error("ACTIVE_SHAPE");
+   return j.total_count>0||j.workflow_runs.length>0;
+  }));
+  if(reads.some(x=>x.status==="fulfilled"&&x.value))return "ACTIVE_DEFERRED";
+  return reads.some(x=>x.status==="rejected")?"ACTIVE_READ_UNAVAILABLE_DEFERRED":null;
+ }
  const selected=routes.filter(r=>r.lane!=="EARLY_DRAW"||(utc.getUTCHours()%4===0&&utc.getUTCMinutes()>=10&&utc.getUTCMinutes()<40));
  for(const r of selected){
   if(now()>=deadline-11000){out.push({lane:r.lane,status:"DEFERRED_DEADLINE"});continue;}
   // Distinct route wake, no repeat POST after timeout or bad ACK. A failed
   // POST job or uncertain ACK in this lane cannot suppress other lane wakes.
   try{
+   const blocked=await busy(r);
+   if(blocked){out.push({lane:r.lane,status:blocked});continue;}
+   if(now()>=deadline-11000){out.push({lane:r.lane,status:"DEFERRED_DEADLINE"});continue;}
    const res=await request("/actions/workflows/"+r.workflow+"/dispatches","POST",{ref:"main",return_run_details:true,inputs:r.inputs});
    if(res.status!==200){out.push({lane:r.lane,status:"ACK_UNKNOWN_OR_REFUSED",httpStatus:res.status});continue;}
    const j=await res.json(),n=j.workflow_run_id;
