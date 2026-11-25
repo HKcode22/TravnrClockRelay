@@ -1,0 +1,368 @@
+/** Direct single-wave fallback for the EXISTING reviewed worker routes.
+ * No V0102/root claim, no chain, no provider key and no DB connection.
+ * A separate approved activation epoch plus full negative-history scans
+ * preserve prior uncertainty; a sliding observation window is NOT a replay
+ * authorization. Pending exact ACKs may be carried only through a byte-
+ * verified predecessor receipt and independent ordinary/active history.
+ * No uncertain attempt may cross a tick boundary.
+ */
+import {readP6RollingGithubSnapshot,restrictP6RollingWave,dispatchP6ReviewedRollingWave,P6_ROLLING_ROUTES,createP6RollingScheduleEvidenceCache} from "./phase6RollingGithubController_v39.mjs";
+import {loadP6RollingCalendarHints,assessP6RollingCalendarHints} from "./phase6RollingCalendarHints_v39.mjs";
+import {createP6SessionAckLedger} from "./phase6RollingSessionAckLedger_v39.mjs";
+import {writeFileSync,appendFileSync,readFileSync,mkdtempSync,rmSync} from "node:fs";
+import {createHash} from "node:crypto";
+import {tmpdir} from "node:os";
+import {join} from "node:path";
+import {execFileSync} from "node:child_process";
+function unpackP6ControllerArtifactArchive(bytes,meta,kind){
+ const name="p6-direct-terminal.json";
+ if(kind!=="DIRECT"||!Buffer.isBuffer(bytes)||bytes.length!==meta.size||bytes.length<1||bytes.length>65536||"sha256:"+createHash("sha256").update(bytes).digest("hex")!==meta.digest)hold("PREDECESSOR_ARCHIVE_DIGEST");
+ const dir=mkdtempSync(join(tmpdir(),"p6-relay-receipt-")),p=join(dir,"receipt.zip");
+ try{
+  writeFileSync(p,bytes,{flag:"wx",mode:0o600});
+  if(execFileSync("unzip",["-Z1",p],{encoding:"utf8",timeout:10000,maxBuffer:4096,stdio:["ignore","pipe","ignore"]}).trim()!==name)hold("PREDECESSOR_ARCHIVE_ENTRY");
+  const raw=execFileSync("unzip",["-p",p,name],{timeout:10000,maxBuffer:32768,stdio:["ignore","pipe","ignore"]});
+  if(raw.length<100||raw.length>32768)hold("PREDECESSOR_RECEIPT_SIZE");return raw;
+ }finally{rmSync(dir,{recursive:true,force:true});}
+}
+export const DIRECT_WF="phase6-relay-controller.yml";
+const TARGET_DIRECT_WF="phase6-direct-recovery-tick.yml";
+export const DIRECT_CONFIRM="RUN_REVIEWED_ISOLATED_CONTROLLER_EXISTING_SIGNED_SCOPE";
+export const DIRECT_TITLE="P6 ISOLATED RELAY CONTROLLER";
+const REPO="HKcode22/ReplitTranvr",ROOT="https://api.github.com/repos/"+REPO,RELAY="HKcode22/TravnrClockRelay",RELAY_ROOT="https://api.github.com/repos/"+RELAY,MIN=60000;
+const OLD="phase6-rolling-controller-bounded-session.yml";
+const states=["queued","in_progress","waiting","requested","pending"];
+const failures=["failure","cancelled","timed_out","action_required","stale","neutral"];
+const hold=s=>{throw Error("HOLD_P6_DIRECT_RECOVERY_"+s);};
+const iso=n=>new Date(n).toISOString();
+const validId=n=>Number.isSafeInteger(n)&&n>0;
+const noCount={providerCalls:0,databaseReads:0,databaseWrites:0,phase6PaidGo:false};
+const flagNames=["P6_ROLLING_CONTROLLER_ENABLED","P6_RELAY_ISOLATED_CONTROLLER_ENABLED","P6_RELAY_ISOLATED_CONTROLLER_APPROVED","V39_PHASE5_FREEZE_SIGNED","V39_PHASE5_SOURCE_RIGHTS_APPROVED","V39_P5_SEVEN_REST_BUDGET_SIGNED","V39_PHASE6_PROCESS_ARMED","V39_PHASE6_OWNER_APPROVED"];
+const conflictNames=["P6_ROLLING_SCHEDULED_ROOT_ENABLED","P6_ROLLING_DYNAMIC_WINDOW_SCOPE_ENABLED","P6_ROLLING_WINDOW_CUSTODY_ENABLED","P6_ROLLING_SESSION_APPROVED"];
+const forbidden=["AERODATABOX_API_KEY","RAPIDAPI_KEY","AERODATABOX_WEBHOOK_SECRET","DATABASE_URL","V39_DATABASE_RUNTIME_URL","V39_P5_SOURCE_DATABASE_URL","P5_V39_PRE_DATABASE_URL","P5_V39_PREPARE_DATABASE_URL","P5_V39_T24_WITNESS_DATABASE_URL","P6_PRIVATE_READER_DATABASE_URL","P6_PRIVATE_PUBLISHER_DATABASE_URL","P5_V39_OTHER_REST_REVIEW_DATABASE_URL","P5_V39_OTHER_REST_RESERVE_DATABASE_URL","P6_ROLLING_WINDOW_CUSTODY_DATABASE_URL"];
+
+export function directDisposition(steps){
+ if(!Array.isArray(steps))return null;
+ const names=["Direct outcome TERMINAL_PARENT_ACKS_RECONCILED","Direct outcome PREFLIGHT_HOLD_NO_POST","Direct outcome KNOWN_ACTIVE_PARENT_ACKS_CARRIED"];
+ const x=names.map(name=>steps.filter(s=>s.name===name));
+ if(x.some(a=>a.length!==1||a[0].status!=="completed"||!["success","skipped"].includes(a[0].conclusion))||
+    x.filter(a=>a[0].conclusion==="success").length!==1)return null;
+ return ["TERMINAL","PREFLIGHT_HOLD","CARRIED"][x.findIndex(a=>a[0].conclusion==="success")];
+}
+// Names only: never serialize env values, credentials, policy bytes, or hashes.
+export function directAdmissionFailures(env,now){
+ const sha=env.P6_RELAY_TARGET_MAIN_SHA,controllerSha=env.GITHUB_SHA,id=Number(env.GITHUB_RUN_ID),since=Date.parse(env.P6_ROLLING_DIRECT_RECOVERY_SINCE_UTC);
+ const bad=[];
+ const check=(name,ok)=>{if(!ok)bad.push(name);};
+ check("GITHUB_ACTIONS",env.GITHUB_ACTIONS==="true");
+ check("GITHUB_REPOSITORY",env.GITHUB_REPOSITORY===RELAY);
+ check("GITHUB_REF",env.GITHUB_REF==="refs/heads/main");
+ check("GITHUB_EVENT_NAME",env.GITHUB_EVENT_NAME==="workflow_dispatch");
+ check("GITHUB_RUN_ATTEMPT",env.GITHUB_RUN_ATTEMPT==="1");
+ check("GITHUB_RUN_ID",/^[1-9][0-9]{0,14}$/.test(env.GITHUB_RUN_ID??"")&&validId(id));
+ check("GITHUB_SHA",/^[a-f0-9]{40}$/.test(controllerSha??"")&&env.P6_RELAY_APPROVED_EXECUTABLE_SHA===controllerSha&&env.P6_RELAY_REQUESTED_EXECUTABLE_SHA===controllerSha);
+ check("TARGET_SHA",/^[a-f0-9]{40}$/.test(sha??"")&&sha!==controllerSha);
+ check("V39_P5_APPROVED_CODE_SHA",env.V39_P5_APPROVED_CODE_SHA===sha);
+ check("P6_ROLLING_REQUESTED_MAIN_SHA",env.P6_ROLLING_REQUESTED_MAIN_SHA===sha);
+ check("P6_ROLLING_SESSION_CONFIRM",env.P6_ROLLING_SESSION_CONFIRM===DIRECT_CONFIRM);
+ for(const k of flagNames)check(k,env[k]==="1");
+ for(const k of conflictNames)check(k,["","0",undefined].includes(env[k]));
+ check("P5_CD_GH_PRE_STOP",env.P5_CD_GH_PRE_STOP==="0");
+ check("ADB_AUTO_COLLECT",env.ADB_AUTO_COLLECT==="0");
+ for(const k of forbidden)check("FORBIDDEN_"+k,!env[k]);
+ check("NODE_TLS_REJECT_UNAUTHORIZED",env.NODE_TLS_REJECT_UNAUTHORIZED!=="0");
+ check("GITHUB_TOKEN_PRESENT",typeof env.GITHUB_TOKEN==="string"&&env.GITHUB_TOKEN.length>=16);
+ check("TARGET_TOKEN_PRESENT",typeof env.TRAVNR_TARGET_ACTIONS_TOKEN==="string"&&env.TRAVNR_TARGET_ACTIONS_TOKEN.length>=16&&env.TRAVNR_TARGET_ACTIONS_TOKEN!==env.GITHUB_TOKEN);
+ check("P6_ROLLING_DIRECT_RECOVERY_SINCE_UTC",Number.isSafeInteger(since)&&iso(since)===env.P6_ROLLING_DIRECT_RECOVERY_SINCE_UTC&&since%1000===0&&since<=now);
+ return bad;
+}
+export function admitDirectTick(env,now,readPlan){
+ const sha=env.P6_RELAY_TARGET_MAIN_SHA,controllerSha=env.GITHUB_SHA,id=Number(env.GITHUB_RUN_ID),since=Date.parse(env.P6_ROLLING_DIRECT_RECOVERY_SINCE_UTC);
+ const bad=directAdmissionFailures(env,now);
+ if(bad.length){
+  if(env.P6_DIRECT_RECOVERY_ENTRYPOINT==="1")console.error("P6_DIRECT_ADMISSION_FAILED_PREDICATES="+bad.join(","));
+  hold("NO_EXACT_SEPARATE_APPROVAL_OR_CONFLICTING_ROOT");
+ }
+ const wire=env.P6_NONPAID_DAILY_POLICY_BASE64;
+ if(typeof wire!=="string"||wire.length>46668||!/^[A-Za-z0-9+/]+={0,2}$/.test(wire))hold("POLICY_WIRE");
+ const policyBytes=Buffer.from(wire,"base64");
+ if(policyBytes.toString("base64")!==wire)hold("POLICY_WIRE");
+ const calendar=loadP6RollingCalendarHints({policyBytes,expectedPolicySha256:env.P6_NONPAID_DAILY_POLICY_SHA256,
+  trust:{reviewedCodeSha:sha,manifestSha256:env.V39_P5_MANIFEST_SHA256,calendarSha256:env.V39_P5_CALENDAR_HASH,
+   releaseSha256:env.V39_P5_RELEASE_SHA256,rightsSha256:env.V39_P5_RIGHTS_SHA256},read:readPlan});
+ if(since<calendar.from||now>=calendar.until||calendar.until-calendar.from>60*24*60*MIN)hold("POLICY_CLOCK");
+ return {sha,controllerSha,id,since,calendar};
+}
+// The artifact GET/redirect is read-only. Retry only that transport, never
+// dispatch POSTs, validation failures, or a changed digest. Three bounded
+// attempts stay inside the predecessor download headroom.
+export async function downloadDirectArchive({artifactId,token,exec=execFileSync,sleep=ms=>new Promise(r=>setTimeout(r,ms))}){
+ if(!validId(artifactId)||typeof token!=="string"||!token)hold("PREDECESSOR_ARCHIVE_ID");
+ for(let i=0;i<3;i++){
+  try{
+   const bytes=exec("gh",["api","--hostname","github.com","--method","GET","repos/"+RELAY+"/actions/artifacts/"+artifactId+"/zip"],{
+    env:{PATH:process.env.PATH,HOME:process.env.HOME,GH_TOKEN:token,GH_PROMPT_DISABLED:"1"},timeout:15000,
+    maxBuffer:131072,stdio:["ignore","pipe","ignore"]});
+   if(!Buffer.isBuffer(bytes)||!bytes.length)hold("PREDECESSOR_ARCHIVE_EMPTY");
+   return bytes;
+  }catch(e){
+   if(e?.message==="HOLD_P6_DIRECT_RECOVERY_PREDECESSOR_ARCHIVE_EMPTY")throw e;
+   if(i===2)hold("PREDECESSOR_ARCHIVE_DOWNLOAD");
+   await sleep(1000*(i+1));
+  }
+ }
+}
+export function readDirectReceipt(raw,{run,sha,controllerSha,since,policySha256,clock,epoch,disposition}){
+ let x;try{x=JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(raw));}catch{hold("PREDECESSOR_RECEIPT_JSON");}
+ const statuses={TERMINAL:"DIRECT_WAVE_TERMINAL_NOT_COLLECTION_PROOF",PREFLIGHT_HOLD:"DIRECT_PREFLIGHT_HOLD_NO_POST",
+  CARRIED:"DIRECT_WAVE_KNOWN_ACTIVE_ACKS_CARRIED_NOT_COLLECTION_PROOF"};
+ if(x?.schema!=="v39.phase6.relay-isolated-controller.v1"||x.controllerExecutableSha!==controllerSha||x.status!==statuses[disposition]||x.runId!==run.id||x.reviewedMainSha!==sha||
+    x.activationUtc!==iso(since)||x.policySha256!==policySha256||x.providerCalls!==0||x.databaseReads!==0||
+    x.databaseWrites!==0||x.phase6PaidGo!==false||x.unknownAttempts!==0||!Array.isArray(x.pendingAcknowledgements)||
+    !Array.isArray(x.terminalAcknowledgements)||!Array.isArray(x.pending))hold("PREDECESSOR_RECEIPT_SCOPE");
+ const seen=new Set(),pendingLanes=new Set(),validLanes=new Set(P6_ROLLING_ROUTES.map(r=>r.lane));
+ const groups=[x.terminalAcknowledgements,x.pendingAcknowledgements];
+ if(groups.flat().length>16||x.acknowledged!==groups.flat().length||x.verifiedTerminal!==groups[0].length||
+    x.pending.length!==groups[1].length)hold("PREDECESSOR_RECEIPT_COUNTS");
+ for(const [i,rows] of groups.entries())for(const q of rows){
+  const sent=Date.parse(q?.sentAtUtc);
+  if(!q||Object.keys(q).sort().join(",")!=="lane,runId,sentAtUtc"||!validId(q.runId)||seen.has(q.runId)||
+     !validLanes.has(q.lane)||!Number.isSafeInteger(sent)||iso(sent)!==q.sentAtUtc||sent<since||sent>clock||
+     i===1&&(sent<epoch||pendingLanes.has(q.lane)))hold("PREDECESSOR_RECEIPT_ACK_SCOPE");
+  seen.add(q.runId);if(i===1)pendingLanes.add(q.lane);
+ }
+ if(x.pending.some(q=>!q||Object.keys(q).sort().join(",")!=="lane,runId"||
+    !groups[1].some(p=>p.runId===q.runId&&p.lane===q.lane))||
+    new Set(x.pending.map(q=>q.runId)).size!==x.pending.length||
+    (disposition==="CARRIED")!==(groups[1].length>0)||
+    disposition==="PREFLIGHT_HOLD"&&groups[0].length!==0)hold("PREDECESSOR_RECEIPT_DISPOSITION");
+ return groups[1];
+}
+// A route's normal history may be fetched just before a scheduled job
+// settles and the active sweep just after. Only this exact observation race
+// is retryable, and only with a fresh complete GET snapshot.
+export function retryableDirectRouteHistory(plan){
+ const blocked=plan?.assessments?.filter(a=>a.state.startsWith("HOLD_"))??[];
+ return plan?.status==="HOLD_ROLLING_WAVE_NO_DISPATCH"&&blocked.length>0&&blocked.every(a=>a.state==="HOLD_HISTORY_CHANGED");
+}
+// Only read-only observation failures are eligible for complete-snapshot
+// retry. No replay of a wave, prior ACK or provider action.
+export function retryableDirectObservationError(error){
+ return ["HOLD_P6_ROLLING_SESSION_ACK_TERMINAL_NOT_YET_RECONCILED",
+  "HOLD_P6_ROLLING_CONTROLLER_GITHUB_ACTIVE_SWEEP_CHANGED",
+  "HOLD_P6_ROLLING_CONTROLLER_GITHUB_HISTORY_UNAVAILABLE_OR_INCOMPLETE_ACTIVE_SWEEP_COUNT"].includes(error?.message);
+}
+export async function runDirectTick(env,{now=Date.now,sleep=ms=>new Promise(r=>setTimeout(r,ms)),fetcher=fetch,readPlan,emit=()=>{},readArchive=downloadDirectArchive}={}){
+ const start=now(),a=admitDirectTick(env,start,readPlan),deadline=Math.min(start+7*MIN,a.calendar.until);
+ const epoch=Math.max(a.since,Math.floor((start-3*60*MIN)/1000)*1000);
+ // EARLY_DRAW has a 240-minute cooldown, longer than ordinary 3h
+ // preview. Retain that exact lane's full cooldown without adding
+ // request load to the six fast lanes and retention monitor.
+ const earlyDrawHistoryEpoch=Math.max(a.since,Math.floor((start-240*MIN)/1000)*1000);
+ const headers={Accept:"application/vnd.github+json",Authorization:"Bearer "+env.TRAVNR_TARGET_ACTIONS_TOKEN,"X-GitHub-Api-Version":"2022-11-28"};
+ const rootHeaders={...headers,Authorization:"Bearer "+env.GITHUB_TOKEN};
+ let journal,attempted=false,requests=0,priorVerified=false,prior=[],predecessorRunId=null;
+ const report=(status,fields={})=>({schema:"v39.phase6.relay-isolated-controller.v1",status,runId:a.id,reviewedMainSha:a.sha,controllerExecutableSha:a.controllerSha,
+  activationUtc:iso(a.since),policySha256:a.calendar.policySha256,historyEpochUtc:iso(epoch),
+  earlyDrawHistoryEpochUtc:iso(earlyDrawHistoryEpoch),
+  predecessorRunId,githubRequests:requests,...fields,...noCount});
+ const api=async(url,init)=>{
+  const u=new URL(url);
+  if(u.origin!=="https://api.github.com"||!u.pathname.startsWith("/repos/"+REPO+"/")||u.username||u.password||u.hash||
+   !["GET","POST"].includes(init?.method)||++requests>420||now()>=deadline-12000)hold("API_BOUND");
+  if(init.method==="POST"&&now()>=Math.min(start+3*MIN,deadline-3*MIN))hold("NO_DRAIN_HEADROOM");
+  // No transport retries for POST. The existing snapshot helper retries
+  // its own GETs; all attempts still consume the global cap above.
+
+  const response=await fetcher(url,{...init,redirect:"error",signal:AbortSignal.timeout(10000)});
+  const remaining=response.headers?.get?.("x-ratelimit-remaining");
+  if(remaining!=null&&(!/^\d+$/.test(remaining)||Number(remaining)<25))hold("RATE_LIMIT_RESERVE");
+  return response;
+ };
+ async function get(path,root=false){
+  for(let i=0;i<3;i++){
+   let r;
+   try{if(root){if(++requests>420||now()>=deadline-12000||!path.startsWith("/")||path.startsWith("//"))hold("ROOT_API_BOUND");r=await fetcher(RELAY_ROOT+path,{method:"GET",headers:rootHeaders,redirect:"error",signal:AbortSignal.timeout(10000)});}else r=await api(ROOT+path,{method:"GET",headers});}
+   catch(e){if(i===2||(!(e instanceof TypeError)&&!["AbortError","TimeoutError"].includes(e?.name)))throw e;await sleep(500*(i+1));continue;}
+   if([502,503,504].includes(r.status)&&i<2){await sleep(500*(i+1));continue;}
+   if(!r.ok)hold("GET_HTTP_"+r.status);
+   return r.json();
+  }
+ }
+ const exactRoot=r=>r?.path===".github/workflows/"+DIRECT_WF&&r.head_sha===a.controllerSha&&r.head_branch==="main"&&
+  r.event==="workflow_dispatch"&&r.run_attempt===1&&r.display_title===DIRECT_TITLE&&validId(r.id)&&
+  Number.isFinite(Date.parse(r.created_at))&&Date.parse(r.created_at)>=a.since&&Date.parse(r.created_at)<=now()+5000;
+ const q=(wf,status,n=1)=>"/actions/workflows/"+wf+"/runs?branch=main&status="+status+"&per_page="+n+
+  "&created="+encodeURIComponent(">="+iso(a.since));
+ function bounded(x,key,cap=100){
+  if(!Number.isSafeInteger(x?.total_count)||x.total_count<0||!Array.isArray(x[key])||
+   x[key].length!==Math.min(cap,x.total_count))hold("HISTORY_RESPONSE_INCOMPLETE");
+  return x[key];
+ }
+ // Match the bounded direct-target count-only GET repair. Retain the exact
+ // original repository/token scope and every identity/custody check.
+ async function getBounded(path,key,cap=100,root=false){
+  for(let i=0;i<3;i++){
+   const x=await get(path,root);
+   const mismatch=Number.isSafeInteger(x?.total_count)&&x.total_count>=0&&
+    Array.isArray(x[key])&&x[key].length!==Math.min(cap,x.total_count);
+   if(mismatch&&i<2&&requests<360&&now()+15000<deadline-12000){
+    emit({status:"DIRECT_ROOT_HISTORY_COUNT_GET_RETRY",attempt:i+1,collection:key,scope:root?"RELAY":"TARGET"});
+    await sleep(1000*(i+1));continue;
+   }
+   return {response:x,rows:bounded(x,key,cap)};
+  }
+ }
+ async function negativeHistory(){
+  // All negative conclusions since the independently approved activation,
+  // not only the three-hour scheduling preview. A historical HOLD is NOT
+  // retired when its clock ages. Query one row plus total_count, no truncation.
+
+  const targets=[TARGET_DIRECT_WF,OLD,...P6_ROLLING_ROUTES.map(r=>r.workflow)];
+  const allowed=new Set(targets.map(wf=>".github/workflows/"+wf));
+  for(const status of failures){
+   // One complete repository-wide negative sweep per conclusion usually
+   // replaces nine requests. If >100 rows, never infer absence from the first
+   // page: check complete per-workflow counts for the same exact time scope.
+   const {response:list,rows:rs}=await getBounded("/actions/runs?branch=main&status="+status+"&per_page=100&created="+encodeURIComponent(">="+iso(a.since)),"workflow_runs");
+   if(list.total_count<=100){
+    if(new Set(rs.map(x=>x.id)).size!==rs.length||rs.some(x=>!validId(x.id)||typeof x.path!=="string"||
+       x.head_branch!=="main"||x.status!=="completed"||x.conclusion!==status||
+       !Number.isFinite(Date.parse(x.created_at))||Date.parse(x.created_at)<a.since))hold("NEGATIVE_HISTORY_IDENTITY");
+    if(rs.some(x=>allowed.has(x.path)))hold("PRIOR_UNSUCCESSFUL_RUN_REVIEW");
+   }else{
+    const counts=await Promise.all(targets.map(wf=>getBounded(q(wf,status),"workflow_runs",1)));
+    for(const {response:x} of counts){if(x.total_count!==0)hold("PRIOR_UNSUCCESSFUL_RUN_REVIEW");}
+   }
+  }
+  for(const status of failures){const {response:x}=await getBounded(q(DIRECT_WF,status),"workflow_runs",1,true);if(x.total_count!==0)hold("PRIOR_RELAY_CONTROLLER_FAILURE_REVIEW");}
+  const {response:skip}=await getBounded(q(DIRECT_WF,"skipped"),"workflow_runs",1,true);
+  if(skip.total_count!==0)hold("PRIOR_DIRECT_GATE_SKIPPED_REVIEW");
+ }
+ async function selfAndPredecessor(){
+  const self=await get("/actions/runs/"+a.id,true);
+  if(!exactRoot(self)||self.id!==a.id||self.status!=="in_progress"||self.conclusion!==null)hold("ROOT_IDENTITY");
+
+  const {rows}=await getBounded(q(DIRECT_WF,"success"),"workflow_runs",1,true);
+  if(rows.length){
+   const r=rows[0];if(!exactRoot(r)||r.id===a.id||r.status!=="completed"||r.conclusion!=="success")hold("PREDECESSOR_IDENTITY");
+   const {response:jobs,rows:js}=await getBounded("/actions/runs/"+r.id+"/jobs?filter=latest&per_page=100","jobs",100,true);
+   if(jobs.total_count!==2||new Set(js.map(j=>j.id)).size!==2||
+      !js.every(j=>validId(j.id)&&j.run_id===r.id&&j.head_sha===a.controllerSha&&j.run_attempt===1&&j.status==="completed")||
+      !["offline-isolated-controller"].every(name=>js.filter(j=>j.name===name&&j.conclusion==="skipped"&&
+        (j.steps==null||Array.isArray(j.steps)&&j.steps.length===0)).length===1))hold("PREDECESSOR_JOB_HISTORY");
+   const m=js.filter(j=>j.name==="direct-protected-recovery-tick"&&j.run_id===r.id&&j.head_sha===a.controllerSha&&j.run_attempt===1&&j.status==="completed"&&j.conclusion==="success");
+   if(m.length!==1||!["Execute one direct recovery wave and reconcile exact parent ACKs","Preserve direct terminal operational receipt"].every(name=>
+      m[0].steps?.filter(s=>s.name===name&&s.status==="completed"&&s.conclusion==="success").length===1)||
+      directDisposition(m[0].steps)===null)hold("PREDECESSOR_NOT_TERMINAL");
+   const disposition=directDisposition(m[0].steps);
+   async function artifact(){
+    const {response:xs,rows}=await getBounded("/actions/runs/"+r.id+"/artifacts?per_page=100","artifacts",100,true);
+    if(xs.total_count!==1||rows[0]?.name!=="p6-direct-terminal-"+r.id||rows[0].expired!==false||
+       !validId(rows[0].id)||!Number.isSafeInteger(rows[0].size_in_bytes)||rows[0].size_in_bytes<1||
+       rows[0].size_in_bytes>65536||!/^sha256:[a-f0-9]{64}$/.test(rows[0].digest??"")||
+       (rows[0].workflow_run&&Number(rows[0].workflow_run.id)!==r.id))hold("PREDECESSOR_ARTIFACT_IDENTITY");
+    return {id:rows[0].id,size:rows[0].size_in_bytes,digest:rows[0].digest};
+   }
+   const before=await artifact();
+   if(now()-start>90*1000)hold("PREDECESSOR_DOWNLOAD_HEADROOM");
+   const raw=unpackP6ControllerArtifactArchive(await readArchive({artifactId:before.id,token:env.GITHUB_TOKEN}),before,"DIRECT");
+   if(JSON.stringify(before)!==JSON.stringify(await artifact()))hold("PREDECESSOR_ARTIFACT_CHANGED");
+   prior=readDirectReceipt(raw,{run:r,sha:a.sha,controllerSha:a.controllerSha,since:a.since,policySha256:a.calendar.policySha256,clock:now(),epoch,disposition});
+   predecessorRunId=r.id;
+  }
+  priorVerified=true;
+  // Root custody is isolated in the relay repository. Target legacy roots
+  // must be absent even before the newly reviewed epoch; no overlap.
+  for(const status of states){
+   const {response:x,rows}=await getBounded("/actions/workflows/"+DIRECT_WF+"/runs?branch=main&status="+status+"&per_page=100","workflow_runs",100,true);if(x.total_count>100||rows.some(r=>!exactRoot(r)||r.status!==status||r.id!==a.id))hold("OVERLAPPING_RELAY_CONTROLLER");
+   if(status==="in_progress"&&!rows.some(r=>r.id===a.id))hold("SELF_NOT_VISIBLE");
+   for(const wf of [TARGET_DIRECT_WF,OLD]){
+    const {response:legacy}=await getBounded("/actions/workflows/"+wf+"/runs?branch=main&status="+status+"&per_page=100","workflow_runs");if(legacy.total_count!==0)hold("OVERLAPPING_TARGET_CONTROLLER");
+   }
+  }
+ }
+ const main=async()=>{
+  if((await get("/git/ref/heads/main"))?.object?.sha!==a.sha||(await get("/git/ref/heads/main",true))?.object?.sha!==a.controllerSha)hold("MAIN_DRIFT");
+  // Exact readback, not a supplied boolean, proves the old controller cannot
+  // admit paid parent dispatch while the independently reviewed relay runs.
+  for(const [name,expected] of [["P6_ROLLING_CONTROLLER_ENABLED","1"],["P6_ROLLING_DIRECT_RECOVERY_ENABLED","0"]]){
+   const row=await get("/actions/variables/"+name);if(row?.name!==name||row.value!==expected)hold("TARGET_CONTROLLER_EXCLUSIVITY");
+  }
+ };
+ try{
+  // Establish predecessor custody even if near policy end or the active
+  // sweep is blocked. Never mint a green empty HOLD over a possible pending ACK.
+  await selfAndPredecessor();
+  if(deadline-start<6*MIN)hold("INSUFFICIENT_POLICY_HEADROOM");
+  await negativeHistory();await main();
+  journal=createP6SessionAckLedger({sha:a.sha,epoch,deadline,now,emit,priorAcknowledgements:prior,directRecovery:true});
+  const cache=createP6RollingScheduleEvidenceCache();
+  // GET-only races (a known active worker settles during a history sweep)
+  // are recoverable by fresh reconciliation. Never repeat a dispatch.
+  async function observe(){
+   for(let i=0;i<3;i++){
+    await journal.reconcile({token:env.TRAVNR_TARGET_ACTIONS_TOKEN,fetcher:api,sleep});
+    try{
+     const snapshots=[];
+     const result=await readP6RollingGithubSnapshot({sha:a.sha,epoch,token:env.TRAVNR_TARGET_ACTIONS_TOKEN,now,fetcher:api,sleep,
+      directRecovery:true,earlyDrawHistoryEpoch,verifySnapshot:(r,x)=>{journal.assertVisible(r,x);snapshots.push(x);},scheduleEvidenceCache:cache});
+     if(result.plan.status!=="REVIEWED_ROLLING_WAVE_PLAN_NO_GO"){
+      emit({status:"DIRECT_ROUTE_HISTORY_HOLD_DIAGNOSTIC",attempt:i+1,blocked:result.plan.assessments.filter(x=>x.state.startsWith("HOLD_")).map(x=>({lane:x.lane,state:x.state,runId:x.runId??null}))});
+      if(i<2&&retryableDirectRouteHistory(result.plan)){await sleep(1000);continue;}
+      hold("CURRENT_ROUTE_HISTORY");
+     }
+     return {result,snapshots};
+    }catch(e){
+     if(i===2||!retryableDirectObservationError(e)||requests>=360||now()+15000>=deadline-12000)throw e;
+     emit({status:"DIRECT_GET_OBSERVATION_RETRY",attempt:i+1,reason:e.message});
+     await sleep(1000*(i+1));
+    }
+   }
+  }
+  const {result:observation}=await observe();
+  if(observation.plan.status!=="REVIEWED_ROLLING_WAVE_PLAN_NO_GO")hold("CURRENT_ROUTE_HISTORY");
+  const hints=assessP6RollingCalendarHints(a.calendar,now());
+  if(hints.status!=="REVIEWED_CALENDAR_WAKE_HINT_ONLY_NO_GO")hold("CALENDAR_UNKNOWN");
+  const plan=restrictP6RollingWave(observation.plan,hints.hints.filter(x=>x.mayNeedWork).map(x=>x.lane));
+  const wave=await dispatchP6ReviewedRollingWave(plan,{sha:a.sha,approvedSha:a.sha,releaseApproved:true,token:env.TRAVNR_TARGET_ACTIONS_TOKEN,
+   now,deadline:Math.min(start+3*MIN,deadline-3*MIN),fetcher:api,mayStartAttempt:()=>requests<220,
+   recheckRoute:async r=>journal.assertVisible(r,await observation.recheckRoute(r)),
+   onEvidence:e=>{if(e.status==="DISPATCH_ATTEMPT_BEFORE_ACK")attempted=true;journal.evidence(e);}});
+  // Let quick parents settle, but never wait 23 minutes and suppress
+  // unrelated next-tick lanes. Independently prove exact known-active
+  // custody in both normal history and the active sweep before publishing.
+  const settleUntil=Math.min(now()+MIN,deadline-2*MIN);
+  while(now()<settleUntil){
+   if(!(await journal.reconcile({token:env.TRAVNR_TARGET_ACTIONS_TOKEN,fetcher:api,sleep})).pending.length)break;
+   await sleep(Math.min(15000,Math.max(1,settleUntil-now())));
+  }
+  const {snapshots}=await observe();
+  journal.verifyContinuationHistory(snapshots);
+  const custody=journal.continuationAcknowledgements(),state=journal.status();
+  await main();
+  return report(state.pending.length?"DIRECT_WAVE_KNOWN_ACTIVE_ACKS_CARRIED_NOT_COLLECTION_PROOF":"DIRECT_WAVE_TERMINAL_NOT_COLLECTION_PROOF",
+   {...state,...custody,calendarDeferred:plan.calendarDeferred.length,requestBudgetDeferred:wave.requestBudgetDeferred.length});
+ }catch(e){
+  // A known pre-POST HOLD is visible without manufacturing a failed
+  // dispatch. Once an attempt marker exists, failure quarantines future
+  // ticks through negativeHistory; never report it as a benign defer.
+  const reason=/^HOLD_[A-Z0-9_]{1,120}$/.test(e?.message??"")?e.message:"HOLD_P6_DIRECT_RECOVERY_REDACTED";
+  if(attempted||!priorVerified||prior.length)throw Error(reason+"_NO_REPLAY");
+  return report("DIRECT_PREFLIGHT_HOLD_NO_POST",{reason,acknowledged:0,verifiedTerminal:0,unknownAttempts:0,
+   pending:[],pendingAcknowledgements:[],terminalAcknowledgements:[]});
+ }
+}
+if(process.env.P6_DIRECT_RECOVERY_ENTRYPOINT==="1"){
+ runDirectTick(process.env,{readPlan:p=>readFileSync(join(process.cwd(),"reviewed-target",p)),emit:e=>console.log(JSON.stringify(e))}).then(r=>{
+
+  if(typeof process.env.GITHUB_OUTPUT!=="string"||!process.env.GITHUB_OUTPUT.startsWith("/")||process.env.GITHUB_OUTPUT.includes("\n")||
+     typeof process.env.RUNNER_TEMP!=="string"||!process.env.RUNNER_TEMP.startsWith("/"))hold("RECEIPT_PATH");
+  const disposition=r.status==="DIRECT_WAVE_TERMINAL_NOT_COLLECTION_PROOF"?"TERMINAL":r.status==="DIRECT_PREFLIGHT_HOLD_NO_POST"?"PREFLIGHT_HOLD":
+   r.status==="DIRECT_WAVE_KNOWN_ACTIVE_ACKS_CARRIED_NOT_COLLECTION_PROOF"?"CARRIED":null;
+  if(!disposition)hold("RECEIPT_DISPOSITION");
+  writeFileSync(join(process.env.RUNNER_TEMP,"p6-direct-terminal.json"),JSON.stringify(r),{flag:"wx",mode:0o600});
+  appendFileSync(process.env.GITHUB_OUTPUT,"direct_disposition="+disposition+"\n","utf8");
+  console.log(JSON.stringify(r));
+ }).catch(e=>{console.error(/^HOLD_[A-Z0-9_]{1,150}$/.test(e?.message??"")?e.message:"HOLD_P6_DIRECT_RECOVERY_FAILED_NO_REPLAY");process.exitCode=2;});
+}

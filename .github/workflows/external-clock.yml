@@ -54,7 +54,7 @@ jobs:
       github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
       github.run_attempt == 1 && vars.TRAVNR_RELAY_MODE == 'MULTI_LANE' &&
       ((inputs.lane == 'PRIMARY_BACKSTOP' && vars.TRAVNR_RELAY_PRIMARY_ENABLED == '1') ||
-      (inputs.lane == 'ROLLING_ROOT' && vars.TRAVNR_RELAY_ROLLING_ENABLED == '1'))
+      (inputs.lane == 'ROLLING_ROOT' && vars.TRAVNR_RELAY_ROLLING_ENABLED == '1' && vars.TRAVNR_RELAY_ROLLING_ROUTE != 'ISOLATED_CONTROLLER' && vars.TRAVNR_RELAY_ROLLING_ROUTE != 'INDEPENDENT_WAKE'))
     environment: travnr-target-forward
     runs-on: ubuntu-latest
     timeout-minutes: 4
@@ -86,3 +86,69 @@ jobs:
           AERODATABOX_API_KEY: ''
           AERODATABOX_WEBHOOK_SECRET: ''
           RAPIDAPI_KEY: ''
+  isolated-controller-forward:
+    if: >-
+      github.repository == 'HKcode22/TravnrClockRelay' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+      github.run_attempt == 1 && inputs.lane == 'ROLLING_ROOT' &&
+      vars.TRAVNR_RELAY_MODE == 'MULTI_LANE' &&
+      vars.TRAVNR_RELAY_ROLLING_ENABLED == '1' &&
+      vars.TRAVNR_RELAY_ROLLING_ROUTE == 'ISOLATED_CONTROLLER' &&
+      vars.P6_RELAY_ISOLATED_CONTROLLER_ENABLED == '1' &&
+      vars.P6_RELAY_APPROVED_EXECUTABLE_SHA == github.sha
+    permissions:
+      contents: read
+      actions: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - name: Forward one exact isolated controller wake
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TRAVNR_RELAY_ROLLING_ROUTE: ${{ vars.TRAVNR_RELAY_ROLLING_ROUTE }}
+          TRAVNR_RELAY_ROLLING_ENABLED: ${{ vars.TRAVNR_RELAY_ROLLING_ENABLED }}
+          TRAVNR_RELAY_ROLLING_SINCE_UTC: ${{ vars.TRAVNR_RELAY_ROLLING_SINCE_UTC }}
+          P6_RELAY_ISOLATED_CONTROLLER_ENABLED: ${{ vars.P6_RELAY_ISOLATED_CONTROLLER_ENABLED }}
+          P6_RELAY_APPROVED_EXECUTABLE_SHA: ${{ vars.P6_RELAY_APPROVED_EXECUTABLE_SHA }}
+          P6_ISOLATED_FORWARD_ENTRYPOINT: '1'
+        run: node isolated/forward.mjs
+
+  independent-wake:
+    if: >-
+      github.repository == 'HKcode22/TravnrClockRelay' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+      github.run_attempt == 1 && inputs.lane == 'ROLLING_ROOT' &&
+      vars.TRAVNR_RELAY_MODE == 'MULTI_LANE' &&
+      vars.TRAVNR_RELAY_ROLLING_ENABLED == '1' &&
+      vars.TRAVNR_RELAY_ROLLING_ROUTE == 'INDEPENDENT_WAKE' &&
+      vars.P6_RELAY_APPROVED_EXECUTABLE_SHA == github.sha
+    environment: travnr-target-forward
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - name: Wake each independent reviewed worker route once
+        env:
+          TRAVNR_RELAY_MODE: MULTI_LANE
+          TRAVNR_RELAY_LANE: ROLLING_ROOT
+          TRAVNR_RELAY_ROLLING_ENABLED: ${{ vars.TRAVNR_RELAY_ROLLING_ENABLED }}
+          TRAVNR_RELAY_ROLLING_ROUTE: ${{ vars.TRAVNR_RELAY_ROLLING_ROUTE }}
+          P6_RELAY_APPROVED_EXECUTABLE_SHA: ${{ vars.P6_RELAY_APPROVED_EXECUTABLE_SHA }}
+          TRAVNR_TARGET_FORWARD_ENV_READY: ${{ vars.TRAVNR_TARGET_FORWARD_ENV_READY }}
+          TRAVNR_APPROVED_TARGET_MAIN_SHA: ${{ vars.TRAVNR_APPROVED_TARGET_MAIN_SHA }}
+          TRAVNR_ROLLING_POLICY_FROM_UTC: ${{ vars.TRAVNR_ROLLING_POLICY_FROM_UTC }}
+          TRAVNR_ROLLING_POLICY_UNTIL_UTC: ${{ vars.TRAVNR_ROLLING_POLICY_UNTIL_UTC }}
+          TRAVNR_TARGET_ACTIONS_TOKEN: ${{ secrets.TRAVNR_TARGET_ACTIONS_TOKEN }}
+          DATABASE_URL: ''
+          AERODATABOX_API_KEY: ''
+          AERODATABOX_WEBHOOK_SECRET: ''
+          RAPIDAPI_KEY: ''
+          P6_INDEPENDENT_WAKE_ENTRYPOINT: '1'
+        run: node isolated/independent-wake.mjs

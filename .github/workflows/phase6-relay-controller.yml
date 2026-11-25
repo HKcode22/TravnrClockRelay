@@ -1,0 +1,114 @@
+name: Phase6 isolated relay controller (STOP default)
+run-name: ${{ github.event_name == 'workflow_dispatch' && 'P6 ISOLATED RELAY CONTROLLER' || 'Isolated controller offline tests' }}
+on:
+  pull_request:
+    branches: [main]
+    paths: ['isolated/**', '.github/workflows/phase6-relay-controller.yml']
+  workflow_dispatch:
+    inputs:
+      confirm:
+        type: string
+        required: true
+      approved_executable_sha:
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: phase6-relay-controller-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'singleton' }}
+  cancel-in-progress: false
+jobs:
+  offline-isolated-controller:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - run: node --check isolated/controller.mjs && node --check isolated/forward.mjs && node --test isolated/*.test.mjs
+  direct-protected-recovery-tick:
+    if: >-
+      github.repository == 'HKcode22/TravnrClockRelay' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+      github.run_attempt == 1 && inputs.confirm == 'RUN_REVIEWED_ISOLATED_CONTROLLER_EXISTING_SIGNED_SCOPE' &&
+      inputs.approved_executable_sha == github.sha &&
+      vars.P6_RELAY_ISOLATED_CONTROLLER_ENABLED == '1' &&
+      vars.P6_RELAY_APPROVED_EXECUTABLE_SHA == github.sha &&
+      vars.TRAVNR_RELAY_ROLLING_ROUTE == 'ISOLATED_CONTROLLER'
+    environment: travnr-isolated-controller
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+    env:
+      P6_RELAY_ISOLATED_CONTROLLER_ENABLED: ${{ vars.P6_RELAY_ISOLATED_CONTROLLER_ENABLED }}
+      P6_RELAY_ISOLATED_CONTROLLER_APPROVED: ${{ secrets.P6_RELAY_ISOLATED_CONTROLLER_APPROVED }}
+      P6_RELAY_APPROVED_EXECUTABLE_SHA: ${{ vars.P6_RELAY_APPROVED_EXECUTABLE_SHA }}
+      P6_RELAY_REQUESTED_EXECUTABLE_SHA: ${{ inputs.approved_executable_sha }}
+      P6_RELAY_TARGET_MAIN_SHA: ${{ vars.TRAVNR_APPROVED_TARGET_MAIN_SHA }}
+      P6_ROLLING_REQUESTED_MAIN_SHA: ${{ vars.TRAVNR_APPROVED_TARGET_MAIN_SHA }}
+      P6_ROLLING_SESSION_CONFIRM: ${{ inputs.confirm }}
+      P6_ROLLING_DIRECT_RECOVERY_SINCE_UTC: ${{ vars.TRAVNR_RELAY_ROLLING_SINCE_UTC }}
+      P6_ROLLING_CONTROLLER_ENABLED: '1'
+      P6_ROLLING_SCHEDULED_ROOT_ENABLED: '0'
+      P6_ROLLING_DYNAMIC_WINDOW_SCOPE_ENABLED: '0'
+      P6_ROLLING_WINDOW_CUSTODY_ENABLED: '0'
+      P6_ROLLING_SESSION_APPROVED: '0'
+      P5_CD_GH_PRE_STOP: ${{ secrets.P5_CD_GH_PRE_STOP }}
+      V39_P5_APPROVED_CODE_SHA: ${{ secrets.V39_P5_APPROVED_CODE_SHA }}
+      V39_PHASE5_FREEZE_SIGNED: ${{ secrets.V39_PHASE5_FREEZE_SIGNED }}
+      V39_PHASE5_SOURCE_RIGHTS_APPROVED: ${{ secrets.V39_PHASE5_SOURCE_RIGHTS_APPROVED }}
+      V39_P5_SEVEN_REST_BUDGET_SIGNED: ${{ secrets.V39_P5_SEVEN_REST_BUDGET_SIGNED }}
+      V39_PHASE6_PROCESS_ARMED: ${{ secrets.V39_PHASE6_PROCESS_ARMED }}
+      V39_PHASE6_OWNER_APPROVED: ${{ secrets.V39_PHASE6_OWNER_APPROVED }}
+      V39_P5_MANIFEST_SHA256: ${{ secrets.V39_P5_MANIFEST_SHA256 }}
+      V39_P5_CALENDAR_HASH: ${{ secrets.V39_P5_CALENDAR_HASH }}
+      V39_P5_RELEASE_SHA256: ${{ secrets.V39_P5_RELEASE_SHA256 }}
+      V39_P5_RIGHTS_SHA256: ${{ secrets.V39_P5_RIGHTS_SHA256 }}
+      P6_NONPAID_DAILY_POLICY_BASE64: ${{ secrets.P6_NONPAID_DAILY_POLICY_BASE64 }}
+      P6_NONPAID_DAILY_POLICY_SHA256: ${{ secrets.P6_NONPAID_DAILY_POLICY_SHA256 }}
+      ADB_AUTO_COLLECT: '0'
+      DATABASE_URL: ''
+      AERODATABOX_API_KEY: ''
+      RAPIDAPI_KEY: ''
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: actions/checkout@v4
+        with:
+          repository: HKcode22/ReplitTranvr
+          ref: ${{ vars.TRAVNR_APPROVED_TARGET_MAIN_SHA }}
+          path: reviewed-target
+          token: ${{ secrets.TRAVNR_TARGET_ACTIONS_TOKEN }}
+          persist-credentials: false
+          sparse-checkout: data-collection/phase5/planning
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - name: Execute one direct recovery wave and reconcile exact parent ACKs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TRAVNR_TARGET_ACTIONS_TOKEN: ${{ secrets.TRAVNR_TARGET_ACTIONS_TOKEN }}
+          P6_DIRECT_RECOVERY_ENTRYPOINT: '1'
+        id: tick
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git -C reviewed-target rev-parse HEAD)" = "$P6_RELAY_TARGET_MAIN_SHA"
+          node isolated/controller.mjs
+      - name: Direct outcome TERMINAL_PARENT_ACKS_RECONCILED
+        if: steps.tick.outputs.direct_disposition == 'TERMINAL'
+        run: echo 'TERMINAL_PARENT_ACKS_RECONCILED_NOT_COLLECTION_PROOF'
+      - name: Direct outcome PREFLIGHT_HOLD_NO_POST
+        if: steps.tick.outputs.direct_disposition == 'PREFLIGHT_HOLD'
+        run: echo 'PREFLIGHT_HOLD_NO_POST'
+      - name: Direct outcome KNOWN_ACTIVE_PARENT_ACKS_CARRIED
+        if: steps.tick.outputs.direct_disposition == 'CARRIED'
+        run: echo 'KNOWN_ACTIVE_PARENT_ACKS_CARRIED_NOT_TERMINAL'
+      - name: Preserve direct terminal operational receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: p6-direct-terminal-${{ github.run_id }}
+          path: ${{ runner.temp }}/p6-direct-terminal.json
+          if-no-files-found: error
+          retention-days: 7
