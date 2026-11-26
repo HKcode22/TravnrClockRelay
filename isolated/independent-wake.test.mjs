@@ -62,3 +62,31 @@ test("active count mismatch is local; an unavailable active read defers only its
  assert(out.lanes.filter(x=>!["SOURCE_POST","T24"].includes(x.lane)).every(x=>x.status==="ACK_NOT_COLLECTION_PROOF"));
  assert.equal(f.calls.filter(x=>x.method==="POST").length,5);
 });
+
+test("slow first route cannot serialize its paired independent lane; concurrency stays bounded",async()=>{
+ const f=fixture();let release,paired;const gate=new Promise(r=>release=r),seen=new Promise(r=>paired=r);
+ const fetcher=async(url,init)=>{
+  if(init.method==="GET"&&url.includes("/"+routes[0].workflow+"/runs"))await gate;
+  const response=await f.fetcher(url,init);
+  if(init.method==="POST"&&url.endsWith("/"+routes[1].workflow+"/dispatches"))paired();
+  return response;
+ };
+ const pending=independentWake(env,{fetcher,now:()=>clock});
+ await seen;
+ assert(!f.calls.some(x=>x.url.includes("/"+routes[2].workflow+"/")));
+ release();
+ const result=await pending;
+ assert.deepEqual(result.lanes.map(x=>x.lane),routes.map(x=>x.lane));
+ assert.equal(f.calls.filter(x=>x.method==="POST").length,7);
+});
+test("deadline crossed during active reads prevents a POST, never retries",async()=>{
+ const f=fixture();let time=clock;
+ const fetcher=async(url,init)=>{
+  const response=await f.fetcher(url,init);
+  if(url.includes("/runs?"))time=clock+111000;
+  return response;
+ };
+ const result=await independentWake(env,{fetcher,now:()=>time});
+ assert.equal(f.calls.filter(x=>x.method==="POST").length,0);
+ assert(result.lanes.every(x=>x.status==="DEFERRED_DEADLINE"));
+});
