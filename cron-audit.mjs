@@ -86,6 +86,10 @@ export function verifyReceipt(c,r,n,run,jobs,log){
  if(run?.id!==n||run.head_sha!==c.pin||run.head_branch!=="main"||run.path!==".github/workflows/"+WF||
     run.event!=="workflow_dispatch"||run.run_attempt!==1||laneOf(c)!=="CLOCK_ONLY"&&run.display_title!=="TRAVNR EXTERNAL CLOCK "+laneOf(c))HOLD("RUN_IDENTITY");
  if(run.status!=="completed")return {status:"RELAY_PENDING",runId:n};
+ if(run.conclusion==="cancelled"){
+  if(!jobs||!Number.isSafeInteger(jobs.total_count)||jobs.total_count<0||!Array.isArray(jobs.jobs)||jobs.jobs.length>jobs.total_count)HOLD("CANCELLED_JOB_READBACK");
+  return {status:jobs.total_count===0&&jobs.jobs.length===0?"RELAY_CANCELED_NO_RUNNER_JOB_UNVERIFIED":"RELAY_CANCELED_EXECUTION_UNVERIFIED",runId:n};
+ }
  if(run.conclusion!=="success")return {status:"RELAY_FAILED",runId:n};
  if(!Array.isArray(jobs?.jobs)||jobs.total_count!==jobs.jobs.length||jobs.jobs.length>100)HOLD("JOBS");
  if(c.shadow){
@@ -278,6 +282,7 @@ export async function audit({c,mode,now,cron,gh,logs,targetGh,sampleLimit=3}){
     if(!id(j?.id))HOLD("PULSE_JOB");
     if(j.conclusion!=="skipped")log=await logs(n,j.id);
    }
+   if(run.status==="completed"&&run.conclusion==="cancelled")jobs=await gh("/actions/runs/"+n+"/jobs?filter=latest&per_page=100");
    Object.assign(x,verifyReceipt(c,r,n,run,jobs,log));
    if(x.status==="RELAY_TARGET_ACK_ONLY"&&targetGh)Object.assign(x,await observeTargetStep(c,x.targetRunId,targetGh));
   }catch(e){x.status="EVIDENCE_HOLD";x.reason=/^HOLD_CRON_MANAGER_[A-Z0-9_]+$/.test(e?.message||"")?e.message:"HOLD_CRON_MANAGER_UNKNOWN";}

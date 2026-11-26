@@ -63,21 +63,23 @@ export async function independentWake(e,{fetcher=fetch,now=Date.now,emit=()=>{}}
   return reads.some(x=>x.status==="rejected")?"ACTIVE_READ_UNAVAILABLE_DEFERRED":null;
  }
  const selected=routes.filter(r=>r.lane!=="EARLY_DRAW"||(utc.getUTCHours()%4===0&&utc.getUTCMinutes()>=10&&utc.getUTCMinutes()<40));
- for(const r of selected){
-  if(now()>=deadline-11000){out.push({lane:r.lane,status:"DEFERRED_DEADLINE"});continue;}
-  // Distinct route wake, no repeat POST after timeout or bad ACK. A failed
-  // POST job or uncertain ACK in this lane cannot suppress other lane wakes.
+ // Bound concurrent route groups to two. Each route still performs its own
+ // active check immediately before its single POST; shared SOURCE/POST is one lane.
+ // The slowest lane no longer serializes all seven distinct workflows.
+ async function wakeRoute(r){
+  if(now()>=deadline-11000)return {lane:r.lane,status:"DEFERRED_DEADLINE"};
   try{
    const blocked=await busy(r);
-   if(blocked){out.push({lane:r.lane,status:blocked});continue;}
-   if(now()>=deadline-11000){out.push({lane:r.lane,status:"DEFERRED_DEADLINE"});continue;}
+   if(blocked)return {lane:r.lane,status:blocked};
+   if(now()>=deadline-11000)return {lane:r.lane,status:"DEFERRED_DEADLINE"};
    const res=await request("/actions/workflows/"+r.workflow+"/dispatches","POST",{ref:"main",return_run_details:true,inputs:r.inputs});
-   if(res.status!==200){out.push({lane:r.lane,status:"ACK_UNKNOWN_OR_REFUSED",httpStatus:res.status});continue;}
+   if(res.status!==200)return {lane:r.lane,status:"ACK_UNKNOWN_OR_REFUSED",httpStatus:res.status};
    const j=await res.json(),n=j.workflow_run_id;
-   if(!id(n)||j.run_url!==root+"/actions/runs/"+n||j.html_url!=="https://github.com/"+TARGET+"/actions/runs/"+n){out.push({lane:r.lane,status:"ACK_UNKNOWN_OR_REFUSED"});continue;}
-   out.push({lane:r.lane,status:"ACK_NOT_COLLECTION_PROOF",runId:n});
-  }catch{out.push({lane:r.lane,status:"ACK_UNKNOWN_OR_REFUSED"});}
+   if(!id(n)||j.run_url!==root+"/actions/runs/"+n||j.html_url!=="https://github.com/"+TARGET+"/actions/runs/"+n)return {lane:r.lane,status:"ACK_UNKNOWN_OR_REFUSED"};
+   return {lane:r.lane,status:"ACK_NOT_COLLECTION_PROOF",runId:n};
+  }catch{return {lane:r.lane,status:"ACK_UNKNOWN_OR_REFUSED"};}
  }
+ for(let i=0;i<selected.length;i+=2)out.push(...await Promise.all(selected.slice(i,i+2).map(wakeRoute)));
  const result={status:"INDEPENDENT_WAKE_COMPLETE_NOT_COLLECTION_PROOF",relayRunId:Number(e.GITHUB_RUN_ID),targetSha:a.targetSha,lanes:out,providerCalls:0,databaseWrites:0,paidAuthorityGranted:false};
  emit(result);return result;
 }

@@ -226,3 +226,17 @@ test("an armed independent pair cannot report a primary-only audit as complete",
  assert.equal(requireManagedAuditCoverage({...e,TRAVNR_RELAY_ROLLING_ENABLED:"0"},"RECENT","PRIMARY_ONLY"),"PRIMARY_ONLY");
  assert.equal(requireManagedAuditCoverage(e,"PILOT","CLOCK_ONLY"),"CLOCK_ONLY");
 });
+
+test("cancelled relay distinguishes empty runner job metadata from execution uncertainty",()=>{
+ const a=mk(),run={...a.run,conclusion:"cancelled"};
+ assert.equal(verifyReceipt(c,a.r,101,run,{total_count:0,jobs:[]},null).status,"RELAY_CANCELED_NO_RUNNER_JOB_UNVERIFIED");
+ assert.equal(verifyReceipt(c,a.r,101,run,a.jobs,null).status,"RELAY_CANCELED_EXECUTION_UNVERIFIED");
+ assert.throws(()=>verifyReceipt(c,a.r,101,run,null,null),/CANCELLED_JOB_READBACK/);
+ assert.throws(()=>verifyReceipt(c,a.r,101,run,{total_count:0,jobs:a.jobs.jobs},null),/CANCELLED_JOB_READBACK/);
+});
+test("cancelled audit reads jobs without log and retains unresolved status",async()=>{
+ const f=fixture(),get=f.gh;
+ const result=await audit({c,mode:"PILOT",now,...f,gh:async path=>path.includes("/jobs")?{total_count:0,jobs:[]}:{...await get(path),conclusion:"cancelled"},logs:async()=>{throw Error("unexpected log");}});
+ assert.equal(result.unresolved,9);assert.equal(result.proven,0);assert.equal(result.fullyProven,false);
+ assert(result.rows.every(x=>x.status==="RELAY_CANCELED_NO_RUNNER_JOB_UNVERIFIED"));
+});
