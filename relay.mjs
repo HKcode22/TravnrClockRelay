@@ -236,9 +236,22 @@ export async function runPulse(env,{fetcher=fetch,now=Date.now,emit=()=>{},sleep
   ![...active,"completed"].includes(r.status))HOLD("RUN_IDENTITY");return r;};
  const main=async()=>{const x=await get(TARGET,"/git/ref/heads/main");if(x?.object?.sha!==env.TRAVNR_APPROVED_TARGET_MAIN_SHA)HOLD("TARGET_MAIN_DRIFT");};
  try{
-  const self=exact(await get(RELAY,"/actions/runs/"+runId),SELF,RELAY);
-  if(self.id!==runId||self.head_sha!==env.GITHUB_SHA||self.event!=="workflow_dispatch"||self.status!=="in_progress"||
-     (multi||shadow)&&self.display_title!==laneTitle(lane))HOLD("SELF_IDENTITY");
+  // A job may start before its own run metadata reflects in_progress.
+  // Retry only the SAME immutable run, pre-POST, using the existing read/time
+  // budget. Wrong lane, code, run ID or terminal state never becomes authority.
+  let self;
+  for(let i=0;i<3;i++){
+   self=exact(await get(RELAY,"/actions/runs/"+runId),SELF,RELAY);
+   if(self.id!==runId||self.head_sha!==env.GITHUB_SHA||self.event!=="workflow_dispatch")HOLD("SELF_IMMUTABLE_IDENTITY");
+   const titlePending=(multi||shadow)&&(self.display_title==null||self.display_title===""||self.display_title==="Travnr relay tests");
+   if((multi||shadow)&&self.display_title!==laneTitle(lane)&&!titlePending)HOLD("SELF_LANE_TITLE");
+   if(self.status==="completed")HOLD("SELF_TERMINAL");
+   if(self.status==="in_progress"&&!titlePending)break;
+   const reason=titlePending?"SELF_TITLE_PENDING":"SELF_ACTIVE_STATUS_PENDING";
+   if(i===2||reads>=40||now()-start+10000+1000*(i+1)>120000)HOLD(reason);
+   emit({status:"EXTERNAL_WAKE_SELF_METADATA_RETRY_NO_POST",mode,relayRunId:runId,attempt:i+1,reason});
+   await sleep(1000*(i+1));
+  }
   const elapsed=now()-Date.parse(self.created_at);
   if(elapsed<0||elapsed>24*3600000)HOLD("SELF_CLOCK");
   const clock={relayRunId:runId,mode,actualCreatedUtc:self.created_at,runnerObservedUtc:iso(now()),creationToObservedMs:elapsed};

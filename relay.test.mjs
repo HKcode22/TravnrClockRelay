@@ -408,3 +408,34 @@ test("native dual-job success is not enough if private APPLY was not executed",a
   else{assert.match(q.reason,/FULL_RETENTION_NATIVE_PRIVATE_APPLY_RECEIPT/);assert.equal(x.posts(),0);}
  }
 });
+
+test("primary self metadata propagation is bounded GET-only before any target request",async()=>{
+ for(const first of [{status:"queued"},{display_title:"Travnr relay tests"},{display_title:null}]){
+  const x=f("PRIMARY_BACKSTOP");x.env.TRAVNR_RELAY_MODE="MULTI_LANE";x.env.TRAVNR_RELAY_LANE="PRIMARY_BACKSTOP";
+  x.env.TRAVNR_RELAY_PRIMARY_ENABLED="1";x.env.TRAVNR_RELAY_PRIMARY_SINCE_UTC=x.env.TRAVNR_RELAY_MODE_SINCE_UTC;x.env.TRAVNR_TARGET_FORWARD_ENV_READY="1";
+  // CLOCK shadow tests below verify no target dispatch on bad self identity.
+  // Stop after self verification by deliberately using the existing lane-off guard.
+  x.env.TRAVNR_RELAY_PRIMARY_ENABLED="0";
+  const original=x.opts.fetcher;let reads=0,other=0;const sleeps=[];
+  x.opts.fetcher=async(url,init)=>{
+   if(url===root+RELAY+"/actions/runs/100"){reads++;return wrap({...row(100,"external-clock.yml",LOCAL,"in_progress"),display_title:"TRAVNR EXTERNAL CLOCK PRIMARY_BACKSTOP",...(reads===1?first:{})});}
+   other++;return original(url,init);
+  };
+  x.opts.sleep=async ms=>{sleeps.push(ms);};
+  const r=await runPulse(x.env,x.opts);
+  assert.equal(r.status,"DEFER_SEPARATE_LANE_OFF");assert.equal(reads,2);assert.equal(other,0);assert.equal(x.posts(),0);assert.deepEqual(sleeps,[1000]);
+  assert.equal(x.events.filter(y=>y.status==="EXTERNAL_WAKE_SELF_METADATA_RETRY_NO_POST").length,1);
+ }
+});
+test("self pending exhaustion, wrong lane, wrong SHA and terminal state never dispatch",async()=>{
+ for(const [patch,reason,n] of [[{status:"queued"},"SELF_ACTIVE_STATUS_PENDING",3],[{display_title:""},"SELF_TITLE_PENDING",3],[{display_title:"TRAVNR EXTERNAL CLOCK ROLLING_ROOT"},"SELF_LANE_TITLE",1],[{head_sha:SHA},"SELF_IMMUTABLE_IDENTITY",1],[{status:"completed"},"SELF_TERMINAL",1]]){
+  const x=f("PRIMARY_BACKSTOP");x.env.TRAVNR_RELAY_MODE="MULTI_LANE";x.env.TRAVNR_RELAY_LANE="PRIMARY_BACKSTOP";
+  x.env.TRAVNR_RELAY_PRIMARY_ENABLED="1";x.env.TRAVNR_RELAY_PRIMARY_SINCE_UTC=x.env.TRAVNR_RELAY_MODE_SINCE_UTC;x.env.TRAVNR_TARGET_FORWARD_ENV_READY="1";
+  let reads=0;
+  x.opts.fetcher=async(url,init)=>{
+   assert.equal(url,root+RELAY+"/actions/runs/100");assert.equal(init.method,"GET");reads++;
+   return wrap({...row(100,"external-clock.yml",LOCAL,"in_progress"),display_title:"TRAVNR EXTERNAL CLOCK PRIMARY_BACKSTOP",...patch});
+  };
+  const r=await runPulse(x.env,x.opts);assert.equal(r.status,"EXTERNAL_WAKE_PREFLIGHT_DEFERRED_NO_POST");assert.equal(r.reason,"HOLD_EXTERNAL_CLOCK_"+reason);assert.equal(r.relayDispatches,0);assert.equal(reads,n);
+ }
+});
